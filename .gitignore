@@ -26,7 +26,7 @@ Thumbs.db
 .claude/settings.json
 .claude/settings.local.json
 
-# Generated output. cobol-parse writes <source-stem>.parse.json beside the source by
+# Generated output. cobol-parser writes <source-stem>.parse.json beside the source by
 # default (and <stem>.parser-diff.json under --diff-producers).
 *.parse.json
 *.parser-diff.json

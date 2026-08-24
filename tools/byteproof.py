@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Byte-stability ratchet over what THIS repo owns: the parse bundle.
 
-The parse bundle (``cobol-parse prog.cbl -o prog.parse.json``) is the one artifact these
+The parse bundle (``cobol-parser prog.cbl -o prog.parse.json``) is the one artifact these
 two distributions produce - the serialized ``Program`` any consumer models from. It is
 deliberately timestamp-free, so parsing the same source twice must produce identical
 bytes, and a refactor of the front-end (normalizer, preprocessor, lexer, parser, data
@@ -10,7 +10,7 @@ downstream views are ratcheted where they are produced: cobol-xstate-json's
 ``tools/gate.py`` hashes every view of every example there, including through the
 parse-bundle round trip, against ITS goldens.
 
-What is hashed is the EXACT TEXT a ``cobol-parse <example> --no-fetch`` run writes -
+What is hashed is the EXACT TEXT a ``cobol-parser <example> --no-fetch`` run writes -
 this driver calls the real CLI, not a reconstruction of it. ``--no-fetch`` keeps the
 ratchet estate-free: every example resolves its copybooks from examples/ alone (the
 directory beside the source is on the search path by default), so the hashes cannot
@@ -44,10 +44,10 @@ from typing import Dict, List
 REPO = Path(__file__).resolve().parents[1]
 EXAMPLES = REPO / "examples"
 
-for _tree in ("core/src", "parser/src"):
+for _tree in ("mainframe-artifacts/src", "cobol-parser/src"):
     sys.path.insert(0, str(REPO / _tree))
 
-from cobol_parse.cli import run as cobol_parse_run                    # noqa: E402
+from cobol_parser.cli import run as cobol_parser_run                    # noqa: E402
 
 
 def normalize(text: str) -> str:
@@ -75,7 +75,7 @@ def build_manifest() -> Dict[str, str]:
     try:
         for src in sorted(EXAMPLES.glob("*.cbl")):
             bundle = tmp / (src.stem + ".parse.json")
-            rc = cobol_parse_run([str(src), "-o", str(bundle), "--no-fetch", "-q"])
+            rc = cobol_parser_run([str(src), "-o", str(bundle), "--no-fetch", "-q"])
             if rc != 0:
                 # A CLI failure is a result, not an absence: record it so --check fails
                 # loudly rather than the bundle silently vanishing from the manifest.
