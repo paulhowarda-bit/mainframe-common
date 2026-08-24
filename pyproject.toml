@@ -1,0 +1,21 @@
+# Development root. This is NOT a distribution - the two that ship from this repo
+# live in core/ and parser/, each with its own pyproject.toml:
+#
+#   core/   cobol-xstate-core  the estate boundary, two-stage retrieval, the replayable
+#                              bundle - shared by every front-end
+#   parser/ cobol-parse        IBM Enterprise COBOL source -> Program AST (depends on core)
+#
+# The consumers live in their own repositories: cobol-xstate (the statechart modelling
+# engine, in cobol-xstate-json) depends on both distributions here; jcl-dependencies
+# depends on core only. Neither is needed to develop, test, or use what this repo ships.
+#
+# What this file exists for is running this repo's suite from a checkout with nothing
+# installed. Install for real with:
+#
+#   python -m pip install -e core -e parser
+
+[tool.pytest.ini_options]
+# Both source trees on sys.path, so `python -m pytest` works with nothing installed
+# (pytest >= 7).
+pythonpath = ["core/src", "parser/src"]
+testpaths = ["core/tests", "parser/tests"]

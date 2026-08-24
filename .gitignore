@@ -1,0 +1,37 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.pytest_cache/
+.venv/
+venv/
+env/
+
+# Tooling
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Claude Code (personal, per-developer settings)
+.claude/settings.json
+.claude/settings.local.json
+
+# Generated output. cobol-parse writes <source-stem>.parse.json beside the source by
+# default (and <stem>.parser-diff.json under --diff-producers).
+*.parse.json
+*.parser-diff.json
+out/
+
+# NOTE: goldens/ and examples/ are deliberately NOT ignored. The goldens are the
+# byte-stability ratchet over the parse bundles of the committed examples - both are
+# worthless if they are not tracked.
