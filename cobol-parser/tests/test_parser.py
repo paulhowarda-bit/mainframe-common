@@ -505,7 +505,7 @@ def test_find_program_id_ignores_a_hyphenated_data_name():
     lines = normalize(
         "       01  WS-SAVED-PROGRAM-ID PIC X(8).\n"
         "       PROGRAM-ID. REALPGM.\n")
-    assert _find_program_id(lines) == "REALPGM"
+    assert _find_program_id(lines) == ("REALPGM", 2)
 
 
 # -- a literal is data, not clause boundaries (audit finding #12) -----------

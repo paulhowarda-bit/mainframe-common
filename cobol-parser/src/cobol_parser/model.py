@@ -227,6 +227,10 @@ class Paragraph:
     name: str
     line: int
     section: Optional[str] = None
+    # True when this entry is a SECTION header itself (not a paragraph within one).
+    # Downstream consumers need the explicit flag: the section=None heuristic breaks
+    # for sections with no child paragraphs.
+    is_section: bool = False
     # The source spelling, when `name` had to be qualified to stay unique. COBOL allows
     # one paragraph name in two SECTIONs; `name` is the machine's state id, this is what
     # the program calls it. None when they are the same.
@@ -242,6 +246,8 @@ class Paragraph:
 @dataclass
 class Program:
     program_id: str
+    # Source line where PROGRAM-ID was matched (0 = unknown/recovered).
+    program_id_line: int = 0
     paragraphs: List[Paragraph] = field(default_factory=list)
     # DECLARATIVES USE-procedure sections (kept OUT of the main flow; entered on error).
     declaratives: List[Paragraph] = field(default_factory=list)

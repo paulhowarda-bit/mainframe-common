@@ -96,12 +96,13 @@ _RESERVED_HEADER = STARTERS | {
 # Pass 1: program structure
 # --------------------------------------------------------------------------- #
 
-def _find_program_id(lines: List[CodeLine]) -> str:
+def _find_program_id(lines: List[CodeLine]) -> Tuple[str, int]:
+    """Return (program-id, source line it was matched on); (\"RECOVERED\", 0) if absent."""
     for cl in lines:
         m = _PROGRAM_ID_RE.search(cl.text)
         if m:
-            return m.group(1).upper()
-    return "RECOVERED"
+            return m.group(1).upper(), cl.line
+    return "RECOVERED", 0
 
 
 # `(?<!-)`: `\b` alone fires after a hyphen, so `\bPROGRAM-ID\b` matched the tail of a data
@@ -325,7 +326,8 @@ def parse_program(source: str, fmt: Optional[SourceFormat] = None,
     # Separate any CONTAINED (nested) programs so their bodies do not fold into the outer
     # program, and so a CALL to one is recognised as internal rather than a missing module.
     lines, contained = _split_program_units(lines)
-    prog = Program(program_id=_find_program_id(lines))
+    program_id, program_id_line = _find_program_id(lines)
+    prog = Program(program_id=program_id, program_id_line=program_id_line)
     prog.nested_programs = contained
     prog.copybooks = pre.copybooks
     if contained:
@@ -560,6 +562,7 @@ def _group_paragraphs(body: List[CodeLine]) -> List[Paragraph]:
             section = name if is_section else section
             current = Paragraph(name=name, line=cl.line,
                                 section=None if is_section else section,
+                                is_section=is_section,
                                 origin=cl.origin)
             buckets.append(current)
             bucket_lines.append([])

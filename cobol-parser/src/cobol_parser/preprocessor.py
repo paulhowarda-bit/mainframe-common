@@ -315,7 +315,7 @@ def preprocess(lines: List[CodeLine], resolver: Optional[CopybookResolver] = Non
                 pairs = _parse_replacing(rep or "")
                 _expand_member(member, pairs + active_replace, resolver, res, _seen, fmt,
                                via="COPY" if copy_m else "EXEC SQL INCLUDE",
-                               replacing=bool(rep))
+                               replacing=bool(rep), source_line=line.line)
                 i = nxt
                 continue
         emit(line)
@@ -325,11 +325,16 @@ def preprocess(lines: List[CodeLine], resolver: Optional[CopybookResolver] = Non
 
 def _expand_member(member, pairs, resolver, res: PreprocessResult, seen: set,
                    fmt: Optional[SourceFormat] = None, via: str = "COPY",
-                   replacing: bool = False) -> None:
+                   replacing: bool = False, source_line: int = 0) -> None:
     key = member.strip().strip("'\"").upper()
 
     def record(status: str, source: Optional[str] = None) -> None:
-        row = {"member": key, "status": status, "via": via, "replacing": replacing}
+        row = {"member": key, "status": status, "via": via, "replacing": replacing,
+               "line": source_line}
+        if replacing and pairs:
+            # The parsed REPLACING clause as (token, replacement) pairs, so a consumer
+            # can see WHAT was substituted without re-parsing the COPY statement.
+            row["replacing_pairs"] = [(t.strip(), v.strip()) for t, v in pairs]
         if source:
             # WHERE this member actually came from - a local path or the label an
             # external fetcher reported. Two programs "using DC01104" are only the
