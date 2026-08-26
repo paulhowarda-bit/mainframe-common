@@ -22,11 +22,11 @@ from __future__ import annotations
 
 import logging
 import re
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Callable, Dict, List, Optional, Set, Tuple
 
 from .normalizer import CodeLine, SourceFormat, detect_source_format, normalize
 from .lexer import Token, tokenize
-from .data_division import parse_data_division
+from .data_division import elementary_subordinates, parse_data_division
 from .textutil import mask_literals
 from .preprocessor import CopybookResolver, preprocess
 from .model import (
@@ -352,6 +352,7 @@ def parse_program(source: str, fmt: Optional[SourceFormat] = None,
 
     prog.working_values = _scan_value_clauses(lines)
     prog.data_items, prog.data_by_name = parse_data_division(lines)
+    expand = _structure_expander(prog.data_items)
     prog.files = _parse_file_control(lines)
     prog.sql_cursors, prog.declared_tables = _scan_sql_declarations(lines)
 
@@ -362,14 +363,35 @@ def parse_program(source: str, fmt: Optional[SourceFormat] = None,
     # DECLARATIVES ... END DECLARATIVES is an orthogonal error-handler region, not part of
     # the main sequential flow - split it out so its USE sections don't pollute it.
     decl_lines, main_lines = _split_declaratives(body)
-    prog.paragraphs = _group_paragraphs(main_lines)
+    prog.paragraphs = _group_paragraphs(main_lines, expand)
     if decl_lines:
-        prog.declaratives = _mark_use_handlers(_group_paragraphs(decl_lines))
+        prog.declaratives = _mark_use_handlers(_group_paragraphs(decl_lines, expand))
     _qualify_duplicate_paragraphs(prog.paragraphs + prog.declaratives)
 
     # Collect CICS HANDLE CONDITION registrations across all statements.
     prog.cics_handlers = _collect_cics_handlers(prog.paragraphs + prog.declaratives)
     return prog
+
+
+def _structure_expander(items) -> Callable[[str], Optional[List[str]]]:
+    """A memoized ``name -> its elementary items, or None`` for the statement parser.
+
+    A CALLABLE rather than the item list: the statement parser has no business knowing
+    what a DataItem is, and `None` (its default) is simply "no data division was
+    supplied", which keeps `StmtParser` constructible on its own. Memoized because
+    :func:`elementary_subordinates` is a linear scan of the whole data division, and a
+    copybook-heavy program does hundreds of SQL statements against the same few DCLGEN
+    groups - repeating the scan per reference is quadratic for no answer that changes.
+    """
+    cache: Dict[str, Optional[List[str]]] = {}
+
+    def expand(name: str) -> Optional[List[str]]:
+        key = (name or "").upper()
+        if key not in cache:
+            cache[key] = elementary_subordinates(items, key)
+        return cache[key]
+
+    return expand
 
 
 def _scan_sql_declarations(lines) -> Tuple[List[dict], List[dict]]:
@@ -540,8 +562,13 @@ def _split_declaratives(body: List[CodeLine]):
     return body[start + 1:end], body[:start] + body[end + 1:]
 
 
-def _group_paragraphs(body: List[CodeLine]) -> List[Paragraph]:
-    """Group body lines into paragraphs by Area-A headers and parse each one's statements."""
+def _group_paragraphs(body: List[CodeLine],
+                      expand: Optional[Callable[[str], Optional[List[str]]]] = None
+                      ) -> List[Paragraph]:
+    """Group body lines into paragraphs by Area-A headers and parse each one's statements.
+
+    ``expand`` resolves a group-level host variable to its elementary items (see
+    :func:`_structure_expander`); without one, host variables are kept as written."""
     if not body:
         return []
     current = Paragraph(name="_ENTRY_", line=body[0].line)
@@ -579,7 +606,7 @@ def _group_paragraphs(body: List[CodeLine]) -> List[Paragraph]:
         # (or a batch of thousands). On failure, fall back to one opaque action carrying
         # the raw text and mark the paragraph so the statechart stage can flag it.
         try:
-            para.statements = StmtParser(tokenize(plines)).parse_paragraph()
+            para.statements = StmtParser(tokenize(plines), expand).parse_paragraph()
         except Exception as exc:  # noqa: BLE001 - deliberate catch-all for corpus safety
             raw = " ".join(cl.text.strip() for cl in plines).strip()
             para.statements = [Action(line=para.line, text=raw[:200], verb="?")]
@@ -652,9 +679,15 @@ def _share_stacked_when_bodies(whens: List[Tuple[str, List[Stmt]]],
 
 
 class StmtParser:
-    def __init__(self, tokens: List[Token]):
+    def __init__(self, tokens: List[Token],
+                 expand: Optional[Callable[[str], Optional[List[str]]]] = None):
         self.toks = tokens
         self.i = 0
+        # Group-level host variable -> its elementary items, the Db2 precompiler's
+        # expansion (parser._structure_expander). Absent, every host variable is kept
+        # exactly as the source spells it - which is also the answer for a name the
+        # data division does not hold.
+        self._expand = expand or (lambda name: None)
 
     # -- token helpers -----------------------------------------------------
     def _peek(self, k: int = 0) -> Optional[Token]:
@@ -1254,12 +1287,25 @@ class StmtParser:
         words = [t.up for t in toks if t.kind == "word"]
         verb = words[0] if words else "?"
         text = " ".join(t.text for t in toks)
-        # host variables: ':' immediately followed by a word
+        # host variables: ':' immediately followed by a word - carrying the Db2
+        # precompiler's two rewrites, because the statement that reaches the database
+        # carries them: a GROUP name stands for its elementary items, and a null
+        # indicator belongs to the variable it qualifies rather than being one of its
+        # own. SQL only: neither construct exists in CICS or DLI, where a ':' is not a
+        # host-variable marker at all.
         host_vars: List[str] = []
-        for idx in range(len(toks)):
-            hv = self._host_var_at(toks, idx)
-            if hv is not None:
-                host_vars.append(":" + hv[0])
+        expanded_structures: List[str] = []
+        indicator_vars: List[str] = []
+        if lang == "SQL":
+            scanned = self._scan_host_vars(toks)
+            indicator_vars = [ind for _, ind in scanned if ind]
+            host_vars = [":" + n for n in self._expand_structures(
+                [n for n, _ in scanned], expanded_structures)]
+        else:
+            for idx in range(len(toks)):
+                hv = self._host_var_at(toks, idx)
+                if hv is not None:
+                    host_vars.append(":" + hv[0])
 
         kind, target, conditions = "effect", None, []
         dynamic = False
@@ -1290,7 +1336,8 @@ class StmtParser:
             elif verb in ("SELECT", "FETCH"):
                 # SELECT/FETCH ... INTO :a, :b ... FROM/WHERE: the DB populates the host
                 # variables. Capture them so the action models a real (external) input.
-                into_vars = self._exec_into_vars(toks)
+                into_vars = self._expand_structures(self._exec_into_vars(toks),
+                                                    expanded_structures)
                 if into_vars:
                     kind = "input"
                 # ...and WHICH COLUMN fills each one - the only thing that proves two
@@ -1316,7 +1363,7 @@ class StmtParser:
                 where_vars = self._exec_where_vars(toks)
             elif verb == "INSERT":
                 columns, column_note, table, values_list = \
-                    self._exec_insert_columns(toks)
+                    self._exec_insert_columns(toks, expanded_structures)
                 # An `INSERT ... SELECT ... WHERE` filters the rows it copies. A plain
                 # VALUES insert has no WHERE at all, and this stays empty.
                 where_vars = self._exec_where_vars(toks)
@@ -1335,7 +1382,9 @@ class StmtParser:
                         column_note=column_note, cursor=cursor,
                         table=table, values_list=values_list,
                         where_vars=where_vars,
-                        select_derivations=select_derivations)
+                        select_derivations=select_derivations,
+                        expanded_structures=expanded_structures,
+                        indicator_vars=indicator_vars)
 
     # -- SQL column <-> host-variable correlation ---------------------------
     #
@@ -1380,6 +1429,76 @@ class StmtParser:
                 and toks[idx + 3].kind == "word"):
             return toks[idx + 3].up, 4
         return toks[idx + 1].up, 2
+
+    @staticmethod
+    def _indicator_at(toks: List[Token], idx: int,
+                      end: Optional[int] = None) -> Optional[Tuple[str, int]]:
+        """The NULL INDICATOR hanging off the host variable that ends at ``idx``, as
+        ``(name, token width)``, or None when nothing there is one.
+
+        Db2 spells it two ways - `:WS-BAL:IND-BAL` and `:WS-BAL INDICATOR :IND-BAL` -
+        and both mean ONE value: host variable WS-BAL, whose null status arrives in
+        IND-BAL. The indicator fills no column and carries no column's data.
+
+        Read as a host variable in its own right it becomes an extra slot, and a cursor
+        selecting 17 columns then disagrees with a FETCH that "has 18 host variables" -
+        so the count gate refuses a correlation that is in fact exact, and every one of
+        those fields reaches the tracer unmapped
+        (docs/issues/host-structure-expansion.md). There is no comma between a variable
+        and its indicator, which is what tells the pair from the next INTO target.
+        """
+        stop = len(toks) if end is None else end
+        j, consumed = idx, 0
+        if j < stop and toks[j].kind == "word" and toks[j].up == "INDICATOR":
+            j += 1
+            consumed += 1
+        ind = StmtParser._host_var_at(toks, j) if j < stop else None
+        return (ind[0], consumed + ind[1]) if ind is not None else None
+
+    @classmethod
+    def _scan_host_vars(cls, toks: List[Token], start: int = 0,
+                        stop: Optional[int] = None) -> List[Tuple[str, Optional[str]]]:
+        """Every host variable in ``toks[start:stop]``, in order, as
+        ``(name, indicator or None)``.
+
+        The ONE colon-walker: stepping by each reference's own width is what keeps a
+        qualified `:GRP . FLD` from being read as two variables and an indicator from
+        being read as a third. Every caller that needs "the host variables here" uses
+        it, so no two of them can disagree about what one IS.
+        """
+        out: List[Tuple[str, Optional[str]]] = []
+        end = len(toks) if stop is None else stop
+        i = start
+        while i < end:
+            hv = cls._host_var_at(toks, i)
+            if hv is None:
+                i += 1
+                continue
+            name, width = hv
+            ind = cls._indicator_at(toks, i + width, end)
+            out.append((name, ind[0] if ind is not None else None))
+            i += width + (ind[1] if ind is not None else 0)
+        return out
+
+    def _expand_structures(self, names: List[str], expanded: List[str]) -> List[str]:
+        """Rewrite each GROUP-level name into its elementary items, in place and in
+        declaration order, recording in ``expanded`` which names were expanded.
+
+        A name the data division does not hold as a group is kept exactly as written -
+        a field in a copybook that did not arrive cannot be expanded, and inventing an
+        expansion for it would be a guess. The count gate downstream then flags it,
+        which is the honest answer.
+        """
+        out: List[str] = []
+        for n in names:
+            subs = self._expand(n)
+            if not subs:
+                out.append(n)
+                continue
+            out.extend(subs)
+            if n not in expanded:
+                expanded.append(n)
+        return out
 
     @staticmethod
     def _split_top_commas(toks: List[Token]) -> List[List[Token]]:
@@ -1661,8 +1780,33 @@ class StmtParser:
             i += 2
         return ".".join(parts)
 
-    @classmethod
-    def _exec_insert_columns(cls, toks: List[Token]
+    def _values_slots(self, val_toks: Optional[List[Token]],
+                      expanded: List[str]) -> List[Optional[str]]:
+        """The VALUES list, one entry per slot AFTER host-structure expansion: the host
+        variable that fills it, or None for a literal/expression slot.
+
+        A group-level slot fills as many columns as the group has elementary items -
+        `VALUES (:BSTI-TRNF-INIT, :WS-MULTI-CO-N)` is two slots in the source and 51 to
+        Db2 - so the expansion has to happen BEFORE the arity is weighed against the
+        column list, or the comparison is between two counts that were never meant to
+        agree.
+        """
+        out: List[Optional[str]] = []
+        for item in self._split_top_commas(val_toks or []):
+            hv = self._host_var_of(item)
+            if hv is None:
+                out.append(None)
+                continue
+            subs = self._expand(hv)
+            if subs:
+                out.extend(subs)
+                if hv not in expanded:
+                    expanded.append(hv)
+            else:
+                out.append(hv)
+        return out
+
+    def _exec_insert_columns(self, toks: List[Token], expanded: List[str]
                              ) -> Tuple[List[dict], Optional[str],
                                         Optional[str], List[Optional[str]]]:
         """`INSERT INTO t (c1, c2) VALUES (:h1, CURRENT TIMESTAMP, :h2)` -> the pairs.
@@ -1680,7 +1824,8 @@ class StmtParser:
         an INSERT with NO column list: the columns then live in the table's DECLARE
         TABLE / DCLGEN, which is a whole-program fact - so this site records the table
         and the ordered VALUES slots, and build time finishes the zip
-        (statechart._correlate_inserts).
+        (statechart._correlate_inserts). Group names expanded on the way are appended to
+        ``expanded``, which the statement carries.
         """
         i_into = next((i for i, t in enumerate(toks)
                        if t.kind == "word" and t.up == "INTO"), None)
@@ -1692,29 +1837,27 @@ class StmtParser:
             return [], ("INSERT ... SELECT / fullselect: the values come from a query "
                         "rather than from host variables, so no column<->field mapping "
                         "exists at this site - the source table's lineage does"), None, []
-        col_toks = cls._paren_group(toks, i_into + 1, i_values)
+        col_toks = self._paren_group(toks, i_into + 1, i_values)
         if col_toks is None:
-            table = cls._table_name(toks[i_into + 1:i_values])
-            val_toks = cls._paren_group(toks, i_values + 1)
-            values = [cls._host_var_of(item)
-                      for item in cls._split_top_commas(val_toks or [])]
-            return [], cls.INSERT_NO_COLUMN_LIST, table, values
-        val_toks = cls._paren_group(toks, i_values + 1)
+            table = self._table_name(toks[i_into + 1:i_values])
+            values = self._values_slots(self._paren_group(toks, i_values + 1), expanded)
+            return [], self.INSERT_NO_COLUMN_LIST, table, values
+        val_toks = self._paren_group(toks, i_values + 1)
         if val_toks is None:
-            return [], "INSERT VALUES list is not parseable here - verify by hand", \
-                None, []
-        cols = [cls._column_of(item) for item in cls._split_top_commas(col_toks)]
-        vals = cls._split_top_commas(val_toks)
+            return [], "INSERT VALUES list is not parseable here - verify by hand",                 None, []
+        cols = [self._column_of(item) for item in self._split_top_commas(col_toks)]
+        vals = self._values_slots(val_toks, expanded)
         if len(cols) != len(vals):
-            return [], (f"{len(cols)} column(s) vs {len(vals)} VALUES item(s): not "
-                        f"correlatable (a host structure expanding to several columns) "
+            return [], (f"{len(cols)} column(s) vs {len(vals)} VALUES item(s), host "
+                        f"structures already expanded: not correlatable - a group whose "
+                        f"data division entry did not arrive cannot be expanded, and a "
+                        f"slot that is not one host variable fills no single column "
                         f"- verify by hand"), None, []
         out: List[dict] = []
         unsourced: List[str] = []
-        for col, item in zip(cols, vals):
+        for col, hv in zip(cols, vals):
             if col is None:
                 continue
-            hv = cls._host_var_of(item)
             if hv is not None:
                 out.append({"column": col, "hostVar": hv})
             else:
@@ -1722,25 +1865,41 @@ class StmtParser:
         if unsourced:
             return out, (f"{len(unsourced)} column(s) written from a literal or "
                          f"expression rather than a host variable "
-                         f"({', '.join(unsourced)}) - no program field maps to them"), \
-                None, []
+                         f"({', '.join(unsourced)}) - no program field maps to them"),                 None, []
         return out, None, None, []
 
     @classmethod
-    def _host_var_of(cls, item: List[Token]) -> Optional[str]:
-        """The host variable one VALUES / SET slot names (`:WS-X` -> WS-X, and the
-        qualified `:GRP . FLD` -> FLD), or None for a literal/expression slot.
+    def _host_var_slot(cls, item: List[Token]) -> Optional[Tuple[str, Optional[str]]]:
+        """The host variable one VALUES / SET slot names, as ``(name, indicator)``, or
+        None for a literal/expression slot.
 
-        The slot has to be JUST the variable. `:A + :B` fills its column from an
-        expression rather than from one field, and `:WS-BAL:IND-BAL` hangs a null
-        indicator off it - neither maps 1:1, so both stay unsourced, which is what the
-        width check below enforces.
+        `:WS-X` -> WS-X, the qualified `:GRP . FLD` -> FLD, and `:WS-BAL:IND-BAL` ->
+        WS-BAL with indicator IND-BAL. That last one used to be refused along with the
+        rest: the slot was required to be JUST the variable, and the indicator made it
+        wider. But an indicator is not a second value - `SET C = :H:IND` writes column C
+        from H exactly as `SET C = :H` does, and it says so in the same breath - so
+        refusing it threw away a mapping the source proves.
+
+        The slot must still be nothing MORE than that. `:A + :B` fills its column from an
+        expression rather than from one field, so it maps to no single field and stays
+        unsourced, which is what the width check below enforces.
         """
         hv = cls._host_var_at(item, 0) if item else None
         if hv is None:
             return None
         name, width = hv
-        return name if len(item) == width else None
+        if len(item) == width:
+            return name, None
+        ind = cls._indicator_at(item, width)
+        if ind is not None and len(item) == width + ind[1]:
+            return name, ind[0]
+        return None
+
+    @classmethod
+    def _host_var_of(cls, item: List[Token]) -> Optional[str]:
+        """The NAME one VALUES / SET slot fills its column from (see `_host_var_slot`)."""
+        slot = cls._host_var_slot(item)
+        return slot[0] if slot is not None else None
 
     @staticmethod
     def _exec_sql_call_target(toks: List[Token]) -> Optional[str]:
@@ -1813,19 +1972,27 @@ class StmtParser:
         """Zip a select list against the INTO host variables - ONLY when the counts prove
         the correspondence.
 
-        The gate is not defensive programming, it is the whole point. `INTO
-        :WS-NAME:IND-NAME, :WS-BAL` yields THREE host variables for TWO columns (indicator
-        variables), and `INTO :CUST-REC` yields one for N (a host structure). A naive zip
-        would map BAL -> IND-NAME and state it as fact. Wrong lineage is worse than none.
+        The gate is not defensive programming, it is the whole point: a naive zip that
+        slipped by one would map BAL -> IND-NAME and state it as fact, and wrong lineage
+        is worse than none.
+
+        The two constructs that used to trip it are now resolved before it rather than
+        refused at it, because both are things the Db2 precompiler DOES to the statement
+        and the source says exactly what it does. `INTO :WS-NAME:IND-NAME, :WS-BAL` is
+        two targets, not three (`_indicator_at`), and `INTO :CUST-REC` is one target per
+        elementary item of CUST-REC, not one (`_expand_structures`). What still fails
+        here is a count nothing in the source explains - a group whose data division
+        entry did not arrive, most of all - and that stays refused.
         """
         if note:
             return [], note
         if not columns or not into_vars:
             return [], None
         if len(columns) != len(into_vars):
-            return [], (f"{len(columns)} column(s) vs {len(into_vars)} host variable(s): "
-                        f"not correlatable (indicator variables, or a host structure "
-                        f"expanding to several columns) - verify by hand")
+            return [], (f"{len(columns)} column(s) vs {len(into_vars)} host variable(s), "
+                        f"host structures already expanded and null indicators already "
+                        f"attached: not correlatable - a group whose data division entry "
+                        f"did not arrive cannot be expanded - verify by hand")
         # A derived slot (`SELECT 'Y'`, `COUNT(*)`, `A + B`) fills its host variable
         # from something that is not a column, so it gets an EXPLICIT `derived` entry
         # rather than silence: without one, "an aggregate fills this field by
@@ -1855,32 +2022,28 @@ class StmtParser:
                             f"{', '.join(derived)} has no column identity")
         return mapped, None
 
-    @staticmethod
-    def _exec_into_vars(toks: List[Token]) -> List[str]:
-        """Collect the :host-vars in the INTO clause of a SELECT/FETCH (up to the next
-        clause keyword)."""
-        out: List[str] = []
-        i = 0
-        while i < len(toks):
-            if toks[i].kind == "word" and toks[i].up == "INTO":
-                i += 1
-                while i < len(toks):
-                    t = toks[i]
-                    if t.kind == "word" and t.up in ("FROM", "WHERE", "ORDER", "GROUP",
-                                                     "HAVING", "FOR"):
-                        break
-                    hv = StmtParser._host_var_at(toks, i)
-                    if hv is not None:
-                        # A qualified `:GRP . FLD` target spans four tokens. Stepping
-                        # two would take `. FLD` for the next INTO item and report a
-                        # phantom host variable in the slot after it.
-                        out.append(hv[0])
-                        i += hv[1]
-                        continue
-                    i += 1
-                break
-            i += 1
-        return out
+    _INTO_END = ("FROM", "WHERE", "ORDER", "GROUP", "HAVING", "FOR")
+
+    @classmethod
+    def _exec_into_vars(cls, toks: List[Token]) -> List[str]:
+        """The TARGETS of a SELECT/FETCH INTO clause, up to the next clause keyword.
+
+        One target per column, which is the whole point - this list is what the count
+        gate weighs against the select list. `INTO :A, :B:IND` names TWO targets, not
+        three: the indicator qualifies B rather than occupying a slot of its own
+        (`_indicator_at`). A qualified `:GRP . FLD` spans four tokens and resolves to
+        FLD; stepping two would take `. FLD` for the next item and report a phantom
+        target in the slot after it. Both rules live in `_scan_host_vars`, so the INTO
+        clause cannot come to disagree with the statement-wide scan about either.
+        """
+        i = next((k for k, t in enumerate(toks)
+                  if t.kind == "word" and t.up == "INTO"), None)
+        if i is None:
+            return []
+        stop = next((k for k in range(i + 1, len(toks))
+                     if toks[k].kind == "word" and toks[k].up in cls._INTO_END),
+                    len(toks))
+        return [n for n, _ in cls._scan_host_vars(toks, i + 1, stop)]
 
     @staticmethod
     def _exec_program(toks: List[Token]) -> Tuple[Optional[str], bool]:

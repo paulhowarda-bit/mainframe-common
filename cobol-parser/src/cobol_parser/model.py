@@ -180,6 +180,17 @@ class ExecStmt(Stmt):
     # the interface can report it as a PARAMETER, the way a SELECT's already are,
     # instead of as a field whose column mapping is missing.
     where_vars: List[str] = field(default_factory=list)
+    # The GROUP-level host variables this statement named, which the Db2 precompiler
+    # expands into their elementary items before the statement reaches the database -
+    # and which the lists above therefore carry EXPANDED. Recorded so a consumer can
+    # tell a field the source wrote from one this expansion supplied; the source
+    # spelling is otherwise only recoverable from the raw text.
+    expanded_structures: List[str] = field(default_factory=list)
+    # The null indicators hanging off those host variables (`:WS-BAL:IND-BAL`). An
+    # indicator carries NULL STATUS, never column data, so it is not a slot of its own
+    # and never appears among the host variables - but it is in the source, and a
+    # nullable column is a fact about the interface worth keeping.
+    indicator_vars: List[str] = field(default_factory=list)
 
 
 @dataclass

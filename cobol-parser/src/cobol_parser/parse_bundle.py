@@ -55,7 +55,9 @@ FORMAT = "cobol-parser"
 #      scan) and ExecStmt.table / ExecStmt.values_list (column-list-less INSERT)
 #   3  ExecStmt.where_vars (the DML row selector, told apart from the data written)
 #      and ExecStmt.select_derivations (what a derived select-list slot is made of)
-VERSION = 3
+#   4  ExecStmt.expanded_structures / ExecStmt.indicator_vars (the Db2 precompiler's
+#      host-structure expansion, and the null indicators that are not slots of their own)
+VERSION = 4
 #: The producer name this package writes. An external producer (a different parser
 #: emitting the same contract) writes its own, so a reader can tell whose parse it is.
 PRODUCER = "cobol-parser-python"

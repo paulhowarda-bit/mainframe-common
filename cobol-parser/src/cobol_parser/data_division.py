@@ -350,3 +350,65 @@ def parse_data_division(lines: List[CodeLine]):
         by_name.setdefault(it.name, it)  # first wins on duplicate (qualified) names
     # Resolve 88 parents' types onto the condition for convenience.
     return items, by_name
+
+
+def elementary_subordinates(items: List[DataItem], name: str) -> Optional[List[str]]:
+    """The elementary items DB2 expands a GROUP-level host variable into, in declaration
+    order - or ``None`` when ``name`` is not a group, so a caller leaves it as written.
+
+    `EXEC SQL FETCH c INTO :BSTI-TRNF-INIT` names a 01-level group, and the DB2
+    precompiler rewrites it into every elementary item under that group before the
+    statement ever reaches the database. A recovery that keeps the source spelling sees
+    ONE host variable where the cursor has fifty columns, so the count gate refuses the
+    correlation and the fifty fields map to nothing. This performs the same expansion,
+    which is a documented precompiler transformation rather than a guess: the shape is in
+    the DATA DIVISION, in the source, in front of us.
+
+    The walk is POSITIONAL over the flat item list, not over ``data_by_name`` (first-wins
+    on duplicate names - a DCLGEN copied twice would expand to the wrong copy) and not
+    over ``DataItem.parent`` (a level-77 item following a group is handed that group as
+    its parent by the level-stack rule, so a parent-chain walk drags standalone items in).
+
+    The exclusions are DB2's, not ours:
+
+    - **FILLER** is not a nameable host variable.
+    - **REDEFINES** occupies its original's storage - DB2 expands the original only - and
+      everything subordinate to a REDEFINES goes with it.
+    - **88-level** condition names are not storage; the walk steps over them.
+    - **66/77** are always top-level, so either ENDS the group's run (a bare ``level >
+      group.level`` test reads `77` as a subordinate of an `01`).
+    - A **nested group** is recursed into, never itself emitted.
+    - An **OCCURS** item is one host variable, not N copies (DB2 takes the first element).
+
+    Returns None rather than an empty list when nothing survives the exclusions (a group
+    of pure FILLER): the caller keeps the source spelling and the count gate flags it,
+    which is the honest answer - an empty expansion would silently delete the reference.
+    """
+    target = (name or "").upper()
+    start = next((i for i, it in enumerate(items)
+                  if it.name == target and it.is_group
+                  and it.level not in (66, 77, 88)), None)
+    if start is None:
+        return None
+    group = items[start]
+    out: List[str] = []
+    # The level of a REDEFINES item whose whole subtree is being skipped.
+    redefined_at: Optional[int] = None
+    for it in items[start + 1:]:
+        if it.level == 88:
+            continue                       # a condition name, not storage
+        if it.level in (66, 77):
+            break                          # always top-level: the group's run ended
+        if it.level <= group.level:
+            break
+        if redefined_at is not None:
+            if it.level > redefined_at:
+                continue                   # still inside the REDEFINES subtree
+            redefined_at = None
+        if it.redefines:
+            redefined_at = it.level
+            continue
+        if it.name == "FILLER" or it.is_group:
+            continue
+        out.append(it.name)
+    return out or None
