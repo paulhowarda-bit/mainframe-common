@@ -53,7 +53,9 @@ FORMAT = "cobol-parser"
 #   1  the initial contract
 #   2  Program.sql_cursors / Program.declared_tables (whole-stream SQL declaration
 #      scan) and ExecStmt.table / ExecStmt.values_list (column-list-less INSERT)
-VERSION = 2
+#   3  ExecStmt.where_vars (the DML row selector, told apart from the data written)
+#      and ExecStmt.select_derivations (what a derived select-list slot is made of)
+VERSION = 3
 #: The producer name this package writes. An external producer (a different parser
 #: emitting the same contract) writes its own, so a reader can tell whose parse it is.
 PRODUCER = "cobol-parser-python"

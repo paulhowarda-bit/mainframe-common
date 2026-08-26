@@ -155,6 +155,12 @@ class ExecStmt(Stmt):
     # The raw select list (None entries = derived expressions). Set for SELECT and for a
     # cursor DECLARE, whose columns must be zipped against a later FETCH's host vars.
     select_list: List[Optional[str]] = field(default_factory=list)
+    # Index-aligned with `select_list`, and filled only where that entry is None: what
+    # the DERIVED slot is made of, as {"expression": "SUM", "derivedFrom": ["BAL_A"]}.
+    # The slot still maps to no column - an aggregate is not its input - but knowing
+    # WHERE it read is the difference between a field derived from something and a
+    # field that came from nowhere.
+    select_derivations: List[Optional[dict]] = field(default_factory=list)
     column_note: Optional[str] = None     # why the columns could NOT be correlated
     # The cursor a FETCH reads, resolved from tokens (a rowset FETCH buries the name
     # behind positioning keywords). It is the join back to the DECLARE that holds the
@@ -168,6 +174,12 @@ class ExecStmt(Stmt):
     # One entry per VALUES slot of a column-list-less INSERT: the host variable that
     # fills the slot, or None for a literal/expression slot (which maps to no field).
     values_list: List[Optional[str]] = field(default_factory=list)
+    # The host variables of a DML statement's TOP-LEVEL WHERE clause, spelled like
+    # `host_vars` (leading ':'). `UPDATE t SET c = :h WHERE k = :f` sends both to Db2,
+    # but only :h reaches a column - :f chooses which ROW is written. Recorded apart so
+    # the interface can report it as a PARAMETER, the way a SELECT's already are,
+    # instead of as a field whose column mapping is missing.
+    where_vars: List[str] = field(default_factory=list)
 
 
 @dataclass
@@ -281,7 +293,7 @@ class Program:
     # parser only walks the PROCEDURE DIVISION, so a cursor DECLAREd in
     # WORKING-STORAGE (the common case: a DCLGEN-adjacent copybook) was invisible to
     # FETCH correlation, and every FETCH on it lost its column identity.
-    #   sql_cursors:     [{cursor, selectList, table, line, member}]
+    #   sql_cursors:     [{cursor, selectList, selectDerivations, table, line, member}]
     #   declared_tables: [{table, columns, line, member}]  (DECLARE TABLE / DCLGEN)
     sql_cursors: List[dict] = field(default_factory=list)
     declared_tables: List[dict] = field(default_factory=list)

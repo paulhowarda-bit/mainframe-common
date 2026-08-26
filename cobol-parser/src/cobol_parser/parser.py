@@ -409,8 +409,9 @@ def _scan_sql_declarations(lines) -> Tuple[List[dict], List[dict]]:
         head = block[0]
         cursor = StmtParser._exec_declare_cursor(block)
         if cursor:
-            select_list, _note = StmtParser._exec_select_columns(block)
+            select_list, derivations, _note =                 StmtParser._exec_select_columns(block)
             cursors.append({"cursor": cursor, "selectList": select_list,
+                            "selectDerivations": derivations,
                             "table": _declare_from_table(block),
                             "line": head.line, "member": head.origin})
             continue
@@ -1255,10 +1256,10 @@ class StmtParser:
         text = " ".join(t.text for t in toks)
         # host variables: ':' immediately followed by a word
         host_vars: List[str] = []
-        for idx, t in enumerate(toks):
-            if t.kind == "punct" and t.text == ":" and idx + 1 < len(toks) \
-                    and toks[idx + 1].kind == "word":
-                host_vars.append(":" + toks[idx + 1].text.upper())
+        for idx in range(len(toks)):
+            hv = self._host_var_at(toks, idx)
+            if hv is not None:
+                host_vars.append(":" + hv[0])
 
         kind, target, conditions = "effect", None, []
         dynamic = False
@@ -1269,6 +1270,8 @@ class StmtParser:
         cursor: Optional[str] = None
         table: Optional[str] = None
         values_list: List[Optional[str]] = []
+        where_vars: List[str] = []
+        select_derivations: List[Optional[dict]] = []
         if lang == "CICS":
             if verb in ("RETURN", "ABEND"):
                 kind = "terminate"
@@ -1294,9 +1297,9 @@ class StmtParser:
                 # programs read the same state. A FETCH's columns live on its cursor's
                 # DECLARE, so it is correlated later (see interface._cursor_columns).
                 if verb == "SELECT":
-                    select_list, column_note = self._exec_select_columns(toks)
-                    columns, column_note = self._correlate(select_list, into_vars,
-                                                           column_note)
+                    select_list, select_derivations, column_note =                         self._exec_select_columns(toks)
+                    columns, column_note = self._correlate(
+                        select_list, into_vars, column_note, select_derivations)
                 else:
                     # The cursor named here is what links this FETCH to the DECLARE
                     # holding its columns; resolved from tokens so the positioning
@@ -1307,12 +1310,18 @@ class StmtParser:
                 # host variables are on the FETCH. Carry the list; the FETCH zips it.
                 cursor = self._exec_declare_cursor(toks)
                 if cursor:
-                    select_list, column_note = self._exec_select_columns(toks)
+                    select_list, select_derivations, column_note =                         self._exec_select_columns(toks)
             elif verb == "UPDATE":
                 columns = self._exec_update_sets(toks)
+                where_vars = self._exec_where_vars(toks)
             elif verb == "INSERT":
                 columns, column_note, table, values_list = \
                     self._exec_insert_columns(toks)
+                # An `INSERT ... SELECT ... WHERE` filters the rows it copies. A plain
+                # VALUES insert has no WHERE at all, and this stays empty.
+                where_vars = self._exec_where_vars(toks)
+            elif verb == "DELETE":
+                where_vars = self._exec_where_vars(toks)
             elif verb == "CALL":
                 # EXEC SQL CALL proc(:p1, :p2): a stored-procedure invocation. The
                 # operands are the procedure's PARAMETERS, not table columns - carrying
@@ -1324,7 +1333,9 @@ class StmtParser:
                         host_vars=host_vars, conditions=conditions,
                         into_vars=into_vars, columns=columns, select_list=select_list,
                         column_note=column_note, cursor=cursor,
-                        table=table, values_list=values_list)
+                        table=table, values_list=values_list,
+                        where_vars=where_vars,
+                        select_derivations=select_derivations)
 
     # -- SQL column <-> host-variable correlation ---------------------------
     #
@@ -1333,6 +1344,42 @@ class StmtParser:
     # same balance, and nothing else in the recovery says so. Parsed HERE, on the token
     # list, because ExecStmt.text is space-joined tokens - re-parsing that string loses
     # paren depth, and `SUM(A,B)` / `SUBSTR(X,1,3)` break a naive comma split.
+
+    @staticmethod
+    def _host_var_at(toks: List[Token], idx: int) -> Optional[Tuple[str, int]]:
+        """The host variable the ':' at ``idx`` introduces, as ``(name, token width)``:
+        uppercased, WITHOUT the colon. None when ``idx`` is not a ':' or nothing
+        nameable follows it.
+
+        The width comes back with the name because a scanner that walks past one
+        variable to find the next has to know how wide this one was - advancing two
+        tokens over a four-token qualified reference reads its own qualifier as the
+        next variable.
+
+        One rule in one place: the statement-wide scan and the WHERE-clause scan have to
+        agree on what a host variable IS. Were they to spell one differently, the same
+        variable would be a field to one and a parameter to the other, and the split
+        between them would leak.
+
+        `:GFAC . AC-ACC-N` is COBOL's QUALIFIED reference - "field AC-ACC-N inside group
+        GFAC" - and the name that means anything downstream is the ELEMENTARY one after
+        the period. Reading only the word after the ':' named the GROUP instead, so
+        every slot of `VALUES (:GFAC . AC-MULTI-CO-N, :GFAC . AC-ACC-N, ...)` came back
+        as the single name "GFAC": no column matched it, and the data dictionary has no
+        such field to trace. The qualifier is dropped rather than kept because the
+        elementary name is what the data division holds and what the naming conventions
+        resolve - `data_division` already collapses same-named fields first-wins, so
+        carrying it would disambiguate nothing that is not already collapsed.
+        """
+        t = toks[idx]
+        if not (t.kind == "punct" and t.text == ":"):
+            return None
+        if idx + 1 >= len(toks) or toks[idx + 1].kind != "word":
+            return None
+        if (idx + 3 < len(toks) and toks[idx + 2].kind == "period"
+                and toks[idx + 3].kind == "word"):
+            return toks[idx + 3].up, 4
+        return toks[idx + 1].up, 2
 
     @staticmethod
     def _split_top_commas(toks: List[Token]) -> List[List[Token]]:
@@ -1370,6 +1417,84 @@ class StmtParser:
             return item[2].up
         return None
 
+    #: Words that are SQL SYNTAX rather than a column name, inside a derived item.
+    #: `CURRENT DATE` / `CURRENT TIMESTAMP` are special registers, not columns; a table
+    #: with a column genuinely called DATE loses a provenance hint here, which is the
+    #: cheaper of the two errors (the entry stays `derived` either way - see below).
+    _SQL_NOT_A_COLUMN = frozenset({
+        "AS", "DISTINCT", "ALL", "CASE", "WHEN", "THEN", "ELSE", "END", "AND", "OR",
+        "NOT", "NULL", "IS", "BETWEEN", "LIKE", "IN", "CAST", "CURRENT", "DATE",
+        "TIME", "TIMESTAMP", "USER", "FROM", "FOR",
+    })
+
+    @classmethod
+    def _columns_in(cls, toks: List[Token]) -> List[str]:
+        """The column-shaped names in a token run, qualifiers dropped (`T . BAL` -> BAL).
+
+        A word that opens a parenthesis is a FUNCTION name, a word after ':' is a host
+        variable, and a word in :attr:`_SQL_NOT_A_COLUMN` is syntax. None of the three
+        is a column, and naming one as the source of a field would be an INVENTED
+        dependency rather than a recovered one.
+        """
+        out: List[str] = []
+        i = 0
+        while i < len(toks):
+            t = toks[i]
+            if t.kind == "punct" and t.text == ":":
+                hv = cls._host_var_at(toks, i)
+                if hv is not None:
+                    i += hv[1]
+                    continue
+            if t.kind != "word":
+                i += 1
+                continue
+            nxt = toks[i + 1] if i + 1 < len(toks) else None
+            if nxt is not None and nxt.kind == "punct" and nxt.text == "(":
+                i += 1                                  # a function name, not a column
+                continue
+            if (nxt is not None and nxt.kind == "period"
+                    and i + 2 < len(toks) and toks[i + 2].kind == "word"):
+                name, i = toks[i + 2].up, i + 3         # T . BAL -> BAL
+            else:
+                name, i = t.up, i + 1
+            if name not in cls._SQL_NOT_A_COLUMN and name not in out:
+                out.append(name)
+        return out
+
+    @classmethod
+    def _derivation_of(cls, item: List[Token]) -> Optional[dict]:
+        """What a DERIVED select-list item is made of: ``{expression, derivedFrom}``.
+
+        `SUM(SPOKE_DOL_A)` fills its host variable from an aggregate OVER MANY ROWS, so
+        the variable is not that column and must never be mapped to it - the entry stays
+        `derived`. But the column is right there in the tokens, and discarding it left
+        the reader with a field that came from nowhere. Recorded as PROVENANCE beside
+        the refusal: we know where the expression read, and we still refuse to call it
+        an identity.
+
+        `COUNT(*)` and `SELECT 'Y'` genuinely have no source column, and say so with an
+        empty ``derivedFrom`` - which is what tells them apart from a SUM whose source
+        was simply lost. A CASE expression refuses to guess: which branch supplied the
+        value is a run-time fact, so its columns are not a dependency this can prove.
+        """
+        for i, t in enumerate(item):                    # drop a trailing `AS alias`
+            if t.kind == "word" and t.up == "AS":
+                item = item[:i]
+                break
+        if not item:
+            return None
+        if any(t.kind == "word" and t.up == "CASE" for t in item):
+            return {"expression": "CASE", "derivedFrom": []}
+        if (len(item) >= 3 and item[0].kind == "word"
+                and item[1].kind == "punct" and item[1].text == "("):
+            # `VALUE(SUM(COL), 0)` reports the OUTERMOST function and recurses through
+            # its arguments, so the innermost named column is what comes back.
+            return {"expression": item[0].up,
+                    "derivedFrom": cls._columns_in(cls._paren_group(item, 1) or [])}
+        if all(t.kind in ("number", "string") for t in item):
+            return {"expression": "literal", "derivedFrom": []}
+        return {"expression": "expression", "derivedFrom": cls._columns_in(item)}
+
     @staticmethod
     def _is_star_item(item: List[Token]) -> bool:
         """True for a select-list item that IS a star: `*` or `T.*`.
@@ -1387,16 +1512,23 @@ class StmtParser:
                 and item[2].kind == "punct" and item[2].text == "*")
 
     @classmethod
-    def _exec_select_columns(cls, toks: List[Token]) -> Tuple[List[Optional[str]], Optional[str]]:
+    def _exec_select_columns(
+            cls, toks: List[Token]) -> Tuple[List[Optional[str]],
+                                             List[Optional[dict]], Optional[str]]:
         """The select list between SELECT and INTO/FROM, as column names (None = derived).
-        Returns ``(columns, note)``; a note means the list cannot be correlated at all."""
+
+        Returns ``(columns, derivations, note)``. ``derivations`` is index-aligned with
+        ``columns`` and holds an entry only where the column is None - what the derived
+        slot is made of, so a lost source column is recoverable as provenance. A note
+        means the list cannot be correlated at all.
+        """
         start = None
         for i, t in enumerate(toks):
             if t.kind == "word" and t.up == "SELECT":
                 start = i + 1
                 break
         if start is None:
-            return [], None
+            return [], [], None
         end = len(toks)
         for i in range(start, len(toks)):
             if toks[i].kind == "word" and toks[i].up in ("INTO", "FROM"):
@@ -1407,9 +1539,12 @@ class StmtParser:
             sel = sel[1:]
         items = cls._split_top_commas(sel)
         if any(cls._is_star_item(item) for item in items):
-            return [], ("SELECT * : the column list is not in the source; resolving it "
-                        "needs the Db2 catalog")
-        return [cls._column_of(item) for item in items], None
+            return [], [], ("SELECT * : the column list is not in the source; resolving "
+                            "it needs the Db2 catalog")
+        columns = [cls._column_of(item) for item in items]
+        derivations = [None if c is not None else cls._derivation_of(item)
+                       for c, item in zip(columns, items)]
+        return columns, derivations, None
 
     @classmethod
     def _exec_update_sets(cls, toks: List[Token]) -> List[dict]:
@@ -1434,10 +1569,46 @@ class StmtParser:
             if eq is None:
                 continue
             col = cls._column_of(item[:eq])
-            rhs = item[eq + 1:]
-            if (col and len(rhs) == 2 and rhs[0].kind == "punct" and rhs[0].text == ":"
-                    and rhs[1].kind == "word"):
-                out.append({"column": col, "hostVar": rhs[1].up})
+            # The same slot rule the VALUES list uses, so `SET C = :GRP . FLD` keeps its
+            # mapping and `SET C = CURRENT TIMESTAMP` still has none.
+            hv = cls._host_var_of(item[eq + 1:])
+            if col and hv is not None:
+                out.append({"column": col, "hostVar": hv})
+        return out
+
+    @classmethod
+    def _exec_where_vars(cls, toks: List[Token]) -> List[str]:
+        """The host variables inside a WHERE clause: the row SELECTOR, at any depth.
+
+        `UPDATE t SET c = :h WHERE k = :f` sends both variables to Db2, but only :h
+        reaches a column - :f decides which ROW is written. Reporting :f among the
+        statement's FIELDS is what made a filter read as a write whose column mapping
+        had been lost, and every one of them arrived downstream as an unmapped field.
+
+        A WHERE is a PREDICATE wherever it appears, so a nested one counts too - but
+        only within its own parentheses. Reading instead from the first WHERE to the end
+        of the statement gets `SET c = (SELECT x FROM y WHERE z = :h1), d = :h2 WHERE
+        k = :h3` exactly backwards, sweeping the write :h2 in with the filters. Tracking
+        the depth each open WHERE sits at, and closing it when its group closes, keeps
+        `:h1` and `:h3` as the filters and leaves `:h2` a write.
+        """
+        out: List[str] = []
+        depth = 0
+        active: List[int] = []          # the depths of the WHERE clauses now open
+        for idx, t in enumerate(toks):
+            if t.kind == "punct" and t.text == "(":
+                depth += 1
+            elif t.kind == "punct" and t.text == ")":
+                depth -= 1
+                while active and active[-1] > depth:
+                    active.pop()
+            elif t.kind == "word" and t.up == "WHERE":
+                if not active or active[-1] != depth:
+                    active.append(depth)
+            if active:
+                hv = cls._host_var_at(toks, idx)
+                if hv is not None and ":" + hv[0] not in out:
+                    out.append(":" + hv[0])
         return out
 
     @staticmethod
@@ -1555,14 +1726,21 @@ class StmtParser:
                 None, []
         return out, None, None, []
 
-    @staticmethod
-    def _host_var_of(item: List[Token]) -> Optional[str]:
-        """The host variable one VALUES slot names (`:WS-X` -> WS-X), or None for a
-        literal/expression slot."""
-        if (len(item) == 2 and item[0].kind == "punct" and item[0].text == ":"
-                and item[1].kind == "word"):
-            return item[1].up
-        return None
+    @classmethod
+    def _host_var_of(cls, item: List[Token]) -> Optional[str]:
+        """The host variable one VALUES / SET slot names (`:WS-X` -> WS-X, and the
+        qualified `:GRP . FLD` -> FLD), or None for a literal/expression slot.
+
+        The slot has to be JUST the variable. `:A + :B` fills its column from an
+        expression rather than from one field, and `:WS-BAL:IND-BAL` hangs a null
+        indicator off it - neither maps 1:1, so both stay unsourced, which is what the
+        width check below enforces.
+        """
+        hv = cls._host_var_at(item, 0) if item else None
+        if hv is None:
+            return None
+        name, width = hv
+        return name if len(item) == width else None
 
     @staticmethod
     def _exec_sql_call_target(toks: List[Token]) -> Optional[str]:
@@ -1629,7 +1807,9 @@ class StmtParser:
 
     @staticmethod
     def _correlate(columns: List[Optional[str]], into_vars: List[str],
-                   note: Optional[str]) -> Tuple[List[dict], Optional[str]]:
+                   note: Optional[str],
+                   derivations: Optional[List[Optional[dict]]] = None
+                   ) -> Tuple[List[dict], Optional[str]]:
         """Zip a select list against the INTO host variables - ONLY when the counts prove
         the correspondence.
 
@@ -1654,9 +1834,20 @@ class StmtParser:
         # still says so per variable - whether a derived slot matters is a judgement
         # for the reviewer looking at the statement, not one to make here by staying
         # quiet.
-        mapped = [{"column": c, "hostVar": h} if c is not None
-                  else {"hostVar": h, "derived": True}
-                  for c, h in zip(columns, into_vars)]
+        # A derived slot carries WHAT it was derived from where the tokens prove it
+        # (parser._derivation_of): still not a column identity - `derived` stays, and no
+        # `column` key is ever added - but the reader can now see that the value came
+        # out of SUM(SPOKE_DOL_A) rather than out of nowhere.
+        mapped: List[dict] = []
+        for i, (c, h) in enumerate(zip(columns, into_vars)):
+            if c is not None:
+                mapped.append({"column": c, "hostVar": h})
+                continue
+            entry = {"hostVar": h, "derived": True}
+            d = derivations[i] if derivations and i < len(derivations) else None
+            if d:
+                entry.update(d)
+            mapped.append(entry)
         derived = [h for c, h in zip(columns, into_vars) if c is None]
         if derived:
             return mapped, (f"{len(derived)} select-list item(s) name no column (literal "
@@ -1678,10 +1869,13 @@ class StmtParser:
                     if t.kind == "word" and t.up in ("FROM", "WHERE", "ORDER", "GROUP",
                                                      "HAVING", "FOR"):
                         break
-                    if t.kind == "punct" and t.text == ":" and i + 1 < len(toks) \
-                            and toks[i + 1].kind == "word":
-                        out.append(toks[i + 1].up)
-                        i += 2
+                    hv = StmtParser._host_var_at(toks, i)
+                    if hv is not None:
+                        # A qualified `:GRP . FLD` target spans four tokens. Stepping
+                        # two would take `. FLD` for the next INTO item and report a
+                        # phantom host variable in the slot after it.
+                        out.append(hv[0])
+                        i += hv[1]
                         continue
                     i += 1
                 break
