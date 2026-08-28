@@ -377,7 +377,7 @@ def call_service_many(fetcher: Callable, requests, jobs: int = 1,
 EXT_FOR_TYPE = {
     "cobol": ".cbl", "copybook": ".cpy", "ddl": ".sql", "cntl": ".txt",
     "bms": ".bms", "csd": ".txt", "jcl": ".jcl", "proc": ".prc", "asm": ".asm",
-    "pli": ".pli", "c": ".c",
+    "pli": ".pli", "c": ".c", "macro": ".mac", "easytrieve": ".ezt",
 }
 
 

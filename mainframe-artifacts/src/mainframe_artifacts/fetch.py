@@ -91,6 +91,12 @@ _KIND_TYPE: Dict[str, str] = {
     "include-member":   "cntl",
     "control-card":     "cntl",
     "dataset":          "cntl",
+    # ...and from an Easytrieve program's manifest (eztrieve_dependencies). A macro is that
+    # language's textual include - it carries record layouts and whole activities - so like
+    # the control members above it is normally already in hand from stage 1 and reports as
+    # `prefetched`. Without a row here it would report `skipped: no known retrieval type`,
+    # which is false: it IS retrievable, and stage 1 retrieved it.
+    "macro":            "macro",
 }
 
 # `PARM.LIB(SORTCRD)` - a dataset that names one member. The member is the retrievable
