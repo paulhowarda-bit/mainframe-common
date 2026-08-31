@@ -57,7 +57,11 @@ FORMAT = "cobol-parser"
 #      and ExecStmt.select_derivations (what a derived select-list slot is made of)
 #   4  ExecStmt.expanded_structures / ExecStmt.indicator_vars (the Db2 precompiler's
 #      host-structure expansion, and the null indicators that are not slots of their own)
-VERSION = 4
+#   5  ExecStmt.cursor_for_kind / ExecStmt.cursor_for_statement, and the matching
+#      forKind / forStatement keys on Program.sql_cursors: WHICH form of `FOR` a cursor
+#      DECLARE used. Absent (a v<=4 bundle) means UNKNOWN, not "select" - a reader must
+#      not treat a missing field as evidence that the cursor is static.
+VERSION = 5
 #: The producer name this package writes. An external producer (a different parser
 #: emitting the same contract) writes its own, so a reader can tell whose parse it is.
 PRODUCER = "cobol-parser-python"

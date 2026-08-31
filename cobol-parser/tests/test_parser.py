@@ -664,3 +664,114 @@ def test_malformed_declare_does_not_run_off_the_token_stream():
         "           STOP RUN.\n"
     ))
     assert prog.sql_cursors == []
+
+
+# --------------------------------------------------------------------------- #
+# WHICH form of `FOR` a cursor DECLARE used
+#
+# `DECLARE c CURSOR FOR SELECT ...` has a statically knowable select list.
+# `DECLARE c CURSOR FOR DYNSTMT` names a PREPAREd statement whose select list does not
+# exist until run time. Both leave `selectList` empty in the second case - and so does
+# a FAILED parse, which is why the form has to be recorded as POSITIVE evidence rather
+# than inferred from emptiness. Without it the two are indistinguishable, and the
+# dynamic one gets reported as a recovery failure that a copybook could fix.
+# --------------------------------------------------------------------------- #
+
+
+def test_declare_for_records_positive_evidence_for_both_forms():
+    prog = parse_program(_wrap(
+        "       0000-MAIN.\n"
+        "           EXEC SQL DECLARE DYN-CSR CURSOR FOR DYNSTMT END-EXEC\n"
+        "           EXEC SQL DECLARE STA-CSR CURSOR FOR\n"
+        "               SELECT A, B FROM T_S\n"
+        "           END-EXEC\n"
+        "           STOP RUN.\n"
+    ))
+    by_cursor = {c["cursor"]: c for c in prog.sql_cursors}
+    assert by_cursor["DYN-CSR"]["forKind"] == "statement"
+    assert by_cursor["DYN-CSR"]["forStatement"] == "DYNSTMT"
+    assert by_cursor["DYN-CSR"]["selectList"] == []      # empty either way...
+    assert by_cursor["STA-CSR"]["forKind"] == "select"   # ...so the FORM is the evidence
+    assert by_cursor["STA-CSR"]["forStatement"] is None
+    # the statement path agrees with the whole-stream scan
+    decls = [st for st in prog.paragraphs[0].statements
+             if getattr(st, "verb", None) == "DECLARE"]
+    assert [(d.cursor, d.cursor_for_kind, d.cursor_for_statement) for d in decls] == [
+        ("DYN-CSR", "statement", "DYNSTMT"), ("STA-CSR", "select", None)]
+
+
+def test_declare_for_is_unknown_rather_than_static_when_no_for_is_reached():
+    """The distinction the whole field exists to make. A DECLARE with no FOR at all
+    must be None - UNKNOWN - and never "select"; claiming static here would assert a
+    select list that was never seen."""
+    prog = parse_program(_wrap(
+        "       0000-MAIN.\n"
+        "           EXEC SQL DECLARE C6 CURSOR END-EXEC\n"
+        "           STOP RUN.\n"
+    ))
+    assert prog.sql_cursors[0]["forKind"] is None
+    assert prog.sql_cursors[0]["forStatement"] is None
+
+
+def test_declare_for_reads_the_first_for_across_every_db2_shape():
+    """The attribute keywords (INSENSITIVE, SCROLL, WITH HOLD, WITH RETURN TO CALLER,
+    ROWSET POSITIONING) all PRECEDE the FOR, and a trailing `FOR FETCH ONLY` /
+    `FOR 10 ROWS` FOLLOWS the select list - so the first FOR is the right one for every
+    shape in this estate. A CTE (`FOR WITH R AS (...) SELECT ...`) is static too."""
+    cases = [
+        ("FOR DYNSTMT",                                   ("statement", "DYNSTMT")),
+        ("FOR SELECT A , B FROM T",                       ("select", None)),
+        ("FOR SELECT A FROM T FOR FETCH ONLY",            ("select", None)),
+        ("FOR WITH R AS ( SELECT A FROM T ) SELECT A FROM R", ("select", None)),
+        ("WITH HOLD FOR DYN-SELECT",                      ("statement", "DYN-SELECT")),
+        ("WITH ROWSET POSITIONING FOR SELECT A FROM T",   ("select", None)),
+        ("WITH RETURN TO CALLER FOR SELECT A FROM T",     ("select", None)),
+        ("FOR    DYN-SELECT",                             ("statement", "DYN-SELECT")),
+        ("FOR : WS-STMT",                                 (None, None)),
+    ]
+    for tail, expected in cases:
+        prog = parse_program(_wrap(
+            "       0000-MAIN.\n"
+            "           EXEC SQL DECLARE CX CURSOR " + tail + " END-EXEC\n"
+            "           STOP RUN.\n"
+        ))
+        got = (prog.sql_cursors[0]["forKind"], prog.sql_cursors[0]["forStatement"])
+        assert got == expected, (tail, got)
+
+
+def test_declare_for_survives_the_attribute_run_between_name_and_cursor():
+    """The two cursor-DECLARE fixes compose: an attribute-qualified DYNAMIC cursor is
+    the shape that was invisible twice over."""
+    prog = parse_program(_wrap(
+        "       0000-MAIN.\n"
+        "           EXEC SQL DECLARE C4 INSENSITIVE SCROLL CURSOR FOR DYNSTMT\n"
+        "           END-EXEC\n"
+        "           STOP RUN.\n"
+    ))
+    assert [(c["cursor"], c["forKind"], c["forStatement"]) for c in prog.sql_cursors] \
+        == [("C4", "statement", "DYNSTMT")]
+
+
+def test_a_statement_form_is_claimed_without_a_matching_prepare():
+    """Deliberate, not a gap: a cursor may name a statement PREPAREd under a different
+    name, and a `DECLARE X STATEMENT` that is never PREPAREd still has no statically
+    knowable select list. Requiring a matching PREPARE would re-hide those."""
+    prog = parse_program(_wrap(
+        "       0000-MAIN.\n"
+        "           EXEC SQL DECLARE C1 CURSOR FOR NEVER-PREPARED END-EXEC\n"
+        "           STOP RUN.\n"
+    ))
+    assert prog.sql_cursors[0]["forKind"] == "statement"
+    assert prog.sql_cursors[0]["forStatement"] == "NEVER-PREPARED"
+
+
+def test_non_cursor_declares_carry_no_for_form():
+    """A DECLARE TABLE never reaches the FOR reader at all - `_exec_declare_cursor`
+    refuses it first - so it must contribute no cursor row and no form."""
+    prog = parse_program(_wrap(
+        "       0000-MAIN.\n"
+        "           EXEC SQL DECLARE T_ACCT TABLE ( A CHAR(8) ) END-EXEC\n"
+        "           STOP RUN.\n"
+    ))
+    assert prog.sql_cursors == []
+    assert [e["table"] for e in prog.declared_tables] == ["T_ACCT"]

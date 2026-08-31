@@ -258,3 +258,61 @@ def test_v2_fields_round_trip_and_v1_bundles_still_open(tmp_path):
     old = open_parse_bundle(out).program()
     assert old.sql_cursors == [] and old.declared_tables == []
     assert old.paragraphs[0].statements[0].table is None
+
+
+def test_v5_records_which_form_of_for_a_cursor_declare_used(tmp_path):
+    """VERSION 5 added `ExecStmt.cursor_for_kind` / `cursor_for_statement` and the
+    matching `forKind` / `forStatement` keys on `Program.sql_cursors`.
+
+    The point of the field is to tell "the select list exists only at run time" apart
+    from "we could not read the select list" - an empty `selectList` means both today.
+    So the round trip has to preserve the distinction, and a v<=4 bundle, which carries
+    no such field, must read back as UNKNOWN rather than as "select".
+    """
+    src = (
+        "       IDENTIFICATION DIVISION.\n"
+        "       PROGRAM-ID. TDYN.\n"
+        "       DATA DIVISION.\n"
+        "       WORKING-STORAGE SECTION.\n"
+        "       01  WS-STMT   PIC X(200).\n"
+        "           EXEC SQL DECLARE DYN-CSR CURSOR FOR DYNSTMT END-EXEC.\n"
+        "       PROCEDURE DIVISION.\n"
+        "       0000-MAIN.\n"
+        "           EXEC SQL DECLARE STA-CSR CURSOR FOR\n"
+        "               SELECT A, B FROM T_S\n"
+        "           END-EXEC\n"
+        "           STOP RUN.\n"
+    )
+    prog = parse_program(src)
+    by_cursor = {c["cursor"]: c for c in prog.sql_cursors}
+    assert by_cursor["DYN-CSR"]["forKind"] == "statement"
+    assert by_cursor["DYN-CSR"]["forStatement"] == "DYNSTMT"
+    # ...and the static one is positively "select", not merely non-dynamic.
+    assert by_cursor["STA-CSR"]["forKind"] == "select"
+    assert by_cursor["STA-CSR"]["forStatement"] is None
+
+    back = _roundtrip(prog)
+    assert back == prog
+    assert back.sql_cursors == prog.sql_cursors
+    decl = back.paragraphs[0].statements[0]
+    assert decl.cursor == "STA-CSR" and decl.cursor_for_kind == "select"
+
+    # A v4 bundle: strip the v5 fields and mark it version 4 - it must still open, and
+    # the absent field must read as UNKNOWN (None), never as "select". A reader that
+    # defaulted it to "select" would call every pre-v5 dynamic cursor static.
+    out = tmp_path / "v4.parse.json"
+    write_parse_bundle(out, source_name="v.cbl", source_text=src,
+                       fmt=SourceFormat.FIXED, program=prog)
+    doc = json.loads(out.read_text(encoding="utf-8"))
+    doc["version"] = 4
+    for c in doc["program"]["sql_cursors"]:
+        c.pop("forKind", None)
+        c.pop("forStatement", None)
+    for st in doc["program"]["paragraphs"][0]["statements"]:
+        st.pop("cursor_for_kind", None)
+        st.pop("cursor_for_statement", None)
+    out.write_text(json.dumps(doc), encoding="utf-8")
+    old = open_parse_bundle(out).program()
+    assert old.paragraphs[0].statements[0].cursor_for_kind is None
+    assert old.paragraphs[0].statements[0].cursor_for_statement is None
+    assert "forKind" not in old.sql_cursors[0]

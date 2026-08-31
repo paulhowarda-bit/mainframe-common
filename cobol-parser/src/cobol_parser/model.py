@@ -166,6 +166,12 @@ class ExecStmt(Stmt):
     # behind positioning keywords). It is the join back to the DECLARE that holds the
     # columns, and it names the endpoint the FETCH crosses.
     cursor: Optional[str] = None
+    # WHICH FORM of `FOR` a cursor DECLARE used: "select" (a select list, so the
+    # columns are statically knowable) or "statement" (a PREPAREd statement name, so
+    # the select list exists only at run time). None on every other statement, and on
+    # a DECLARE whose FOR was not reached: ABSENT MEANS UNKNOWN, never "select".
+    cursor_for_kind: Optional[str] = None
+    cursor_for_statement: Optional[str] = None
     # The DML target table, recorded when a later pass still has work to do on this
     # statement: an INSERT with no explicit column list keeps its table here (with the
     # VALUES slots below) so build time can zip them against the table's DECLARE
@@ -304,7 +310,8 @@ class Program:
     # parser only walks the PROCEDURE DIVISION, so a cursor DECLAREd in
     # WORKING-STORAGE (the common case: a DCLGEN-adjacent copybook) was invisible to
     # FETCH correlation, and every FETCH on it lost its column identity.
-    #   sql_cursors:     [{cursor, selectList, selectDerivations, table, line, member}]
+    #   sql_cursors:     [{cursor, selectList, selectDerivations, table, forKind,
+    #                     forStatement, line, member}]
     #   declared_tables: [{table, columns, line, member}]  (DECLARE TABLE / DCLGEN)
     sql_cursors: List[dict] = field(default_factory=list)
     declared_tables: List[dict] = field(default_factory=list)

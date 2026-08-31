@@ -405,7 +405,9 @@ def _scan_sql_declarations(lines) -> Tuple[List[dict], List[dict]]:
     column-list-less INSERT its table's declared order, wherever the DECLARE lives.
 
     Returns ``(cursors, tables)``:
-      cursors: [{cursor, selectList, selectDerivations, table, line, member}]
+      cursors: [{cursor, selectList, selectDerivations, table, forKind,
+                 forStatement, line, member}]
+               forKind: "select" | "statement" | None (None = UNKNOWN)
       tables:  [{table, columns, line, member}]
     """
     cursors: List[dict] = []
@@ -432,9 +434,11 @@ def _scan_sql_declarations(lines) -> Tuple[List[dict], List[dict]]:
         cursor = StmtParser._exec_declare_cursor(block)
         if cursor:
             select_list, derivations, _note =                 StmtParser._exec_select_columns(block)
+            for_kind, for_stmt = StmtParser._exec_declare_for(block)
             cursors.append({"cursor": cursor, "selectList": select_list,
                             "selectDerivations": derivations,
                             "table": _declare_from_table(block),
+                            "forKind": for_kind, "forStatement": for_stmt,
                             "line": head.line, "member": head.origin})
             continue
         entry = _declare_table_columns(block)
@@ -1314,6 +1318,8 @@ class StmtParser:
         select_list: List[Optional[str]] = []
         column_note: Optional[str] = None
         cursor: Optional[str] = None
+        cursor_for_kind: Optional[str] = None
+        cursor_for_statement: Optional[str] = None
         table: Optional[str] = None
         values_list: List[Optional[str]] = []
         where_vars: List[str] = []
@@ -1358,6 +1364,7 @@ class StmtParser:
                 cursor = self._exec_declare_cursor(toks)
                 if cursor:
                     select_list, select_derivations, column_note =                         self._exec_select_columns(toks)
+                    cursor_for_kind, cursor_for_statement =                         self._exec_declare_for(toks)
             elif verb == "UPDATE":
                 columns = self._exec_update_sets(toks)
                 where_vars = self._exec_where_vars(toks)
@@ -1384,7 +1391,9 @@ class StmtParser:
                         where_vars=where_vars,
                         select_derivations=select_derivations,
                         expanded_structures=expanded_structures,
-                        indicator_vars=indicator_vars)
+                        indicator_vars=indicator_vars,
+                        cursor_for_kind=cursor_for_kind,
+                        cursor_for_statement=cursor_for_statement)
 
     # -- SQL column <-> host-variable correlation ---------------------------
     #
@@ -1964,6 +1973,40 @@ class StmtParser:
                 # came after it.
                 return None
         return None
+
+    @staticmethod
+    def _exec_declare_for(toks: List[Token]) -> Tuple[Optional[str], Optional[str]]:
+        """``DECLARE c CURSOR ... FOR <what>`` -> ``(kind, statement)``.
+
+        ``("select", None)`` for a select list (or a ``WITH`` common table expression),
+        ``("statement", "DYNSTMT")`` for a PREPAREd statement name, ``(None, None)``
+        when no FOR was reached.
+
+        POSITIVE evidence only. An empty ``selectList`` already means "no SELECT
+        found", which is also exactly what a FAILED parse looks like, so dynamic-ness
+        must never be inferred from it - the whole point of recording the form is to
+        tell "the select list exists only at run time" apart from "we could not read
+        the select list", and an inference from emptiness collapses them again.
+
+        The FIRST ``FOR`` is the right one for every shape in this estate: the
+        attribute keywords (INSENSITIVE, SCROLL, WITH HOLD, WITH RETURN TO CALLER,
+        ROWSET POSITIONING) all precede it, and a trailing ``FOR FETCH ONLY`` /
+        ``FOR 10 ROWS`` follows the select list.
+
+        "statement" is claimed for a statement name whether or not a matching PREPARE
+        is found anywhere. That is deliberate: a cursor may name a statement PREPAREd
+        under a different name, and a ``DECLARE X STATEMENT`` that is never PREPAREd
+        still has no statically knowable select list.
+        """
+        for i, t in enumerate(toks):
+            if t.kind == "word" and t.up == "FOR" and i + 1 < len(toks):
+                nxt = toks[i + 1]
+                if nxt.kind != "word":
+                    return None, None
+                if nxt.up in ("SELECT", "WITH"):
+                    return "select", None
+                return "statement", nxt.up
+        return None, None
 
     @classmethod
     def _exec_fetch_cursor(cls, toks: List[Token]) -> Optional[str]:
