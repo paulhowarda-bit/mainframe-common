@@ -541,3 +541,126 @@ def test_select_clause_survives_a_dataset_literal_containing_select():
     assert files["F1"]["statusField"] == "WS-FS1"
     # ...and the literal did not swallow the NEXT entry either.
     assert files["F2"]["assign"] == "OUTDD"
+
+
+# --------------------------------------------------------------------------- #
+# Db2 cursor DECLARE attributes
+#
+# `DECLARE cursor-name [ASENSITIVE|INSENSITIVE|SENSITIVE STATIC|SENSITIVE DYNAMIC]
+#  [NO SCROLL|SCROLL] CURSOR [WITH HOLD] ... FOR select`. Binding on "CURSOR is the
+# token after the name" refuses the whole statement, and refusing it is not a harmless
+# miss: no cursor is registered, so every FETCH on it loses its columns, its endpoint
+# becomes a phantom `<cursor NAME>` instead of the real table, and the diagnosis blames
+# an absent copybook for a DECLARE sitting in the source.
+# --------------------------------------------------------------------------- #
+
+
+def _declare(attrs: str) -> str:
+    return _wrap(
+        "       0000-MAIN.\n"
+        "           EXEC SQL DECLARE CSR1 " + attrs + " CURSOR FOR\n"
+        "             SELECT A, B FROM T_ACCT\n"
+        "           END-EXEC.\n"
+        "           STOP RUN.\n"
+    )
+
+
+def test_declare_cursor_accepts_scroll_and_sensitivity_attributes():
+    """Db2 allows an attribute run between the cursor NAME and the CURSOR keyword,
+    exactly as it allows a positioning run between FETCH and its cursor name. The four
+    forms the estate actually uses are INSENSITIVE SCROLL, SCROLL, SENSITIVE STATIC
+    SCROLL and SENSITIVE DYNAMIC SCROLL; the rest are here for grammar coverage."""
+    for attrs in ("", "INSENSITIVE", "ASENSITIVE", "INSENSITIVE SCROLL",
+                  "SENSITIVE STATIC", "SENSITIVE DYNAMIC SCROLL", "NO SCROLL",
+                  "SCROLL"):
+        prog = parse_program(_declare(attrs))
+        # whole-stream scan path -> Program.sql_cursors
+        assert [d["cursor"] for d in prog.sql_cursors] == ["CSR1"], attrs
+        assert prog.sql_cursors[0]["selectList"] == ["A", "B"], attrs
+        assert prog.sql_cursors[0]["table"] == "T_ACCT", attrs
+        # statement path -> ExecStmt
+        st = prog.paragraphs[0].statements[0]
+        assert st.verb == "DECLARE" and st.cursor == "CSR1", attrs
+        assert st.select_list == ["A", "B"], attrs
+
+
+def test_holdability_still_follows_the_cursor_keyword():
+    """WITH HOLD / WITH RETURN come AFTER CURSOR and so are not attributes. They are
+    deliberately absent from the skip set - putting them in would only let a malformed
+    statement slide - and this pins that the real form still parses."""
+    prog = parse_program(_wrap(
+        "       0000-MAIN.\n"
+        "           EXEC SQL DECLARE CSR1 INSENSITIVE SCROLL CURSOR WITH HOLD FOR\n"
+        "             SELECT A FROM T_ACCT\n"
+        "           END-EXEC.\n"
+        "           STOP RUN.\n"
+    ))
+    assert [d["cursor"] for d in prog.sql_cursors] == ["CSR1"]
+    assert prog.sql_cursors[0]["table"] == "T_ACCT"
+
+
+def test_declare_cursor_name_may_be_an_attribute_keyword():
+    """GUARD (passes before and after). The name is positional, so it must never be
+    tested against the attribute set - an implementation that starts skipping at i+1
+    instead of i+2 would swallow the name and break this."""
+    prog = parse_program(_wrap(
+        "       0000-MAIN.\n"
+        "           EXEC SQL DECLARE SCROLL CURSOR FOR SELECT A FROM T END-EXEC\n"
+        "           STOP RUN.\n"
+    ))
+    assert [d["cursor"] for d in prog.sql_cursors] == ["SCROLL"]
+
+
+def test_declare_cursor_across_fixed_format_lines_with_underscored_name():
+    """The real estate shape (IDS662C): DECLARE and the attributes are on SEPARATE
+    lines and the name carries underscores, which `lexer._is_word_char` admits. A
+    single-line grep finds none of these, which is part of why it survived."""
+    prog = parse_program(_wrap(
+        "       0000-MAIN.\n"
+        "           EXEC SQL DECLARE WC_TRDS_AND_CNFMS_ACCT_ASC\n"
+        "                INSENSITIVE SCROLL CURSOR FOR\n"
+        "                SELECT A, B FROM T_IDPN_PENDCA\n"
+        "           END-EXEC\n"
+        "           STOP RUN.\n"
+    ))
+    assert [d["cursor"] for d in prog.sql_cursors] == ["WC_TRDS_AND_CNFMS_ACCT_ASC"]
+    assert prog.sql_cursors[0]["table"] == "T_IDPN_PENDCA"
+
+
+def test_non_cursor_declares_still_name_no_cursor():
+    """GUARD (passes before and after). DECLARE TABLE / STATEMENT / GLOBAL TEMPORARY
+    TABLE must stay refused - they hold no select list to zip, and DECLARE TABLE is
+    routed to declared_tables instead.
+
+    Noted in passing and deliberately NOT asserted: for the GLOBAL TEMPORARY TABLE
+    form `declared_tables` records the table as "GLOBAL". That is a separate
+    pre-existing defect in `_declare_table_columns`, out of scope here, and this test
+    must not be read as blessing it.
+    """
+    for stmt in ("DECLARE T_ACCT TABLE ( A CHAR(8), B CHAR(4) )",
+                 "DECLARE S1 STATEMENT",
+                 "DECLARE GLOBAL TEMPORARY TABLE TMP1 ( A CHAR(8) )"):
+        prog = parse_program(_wrap(
+            "       0000-MAIN.\n"
+            "           EXEC SQL " + stmt + " END-EXEC\n"
+            "           STOP RUN.\n"
+        ))
+        assert prog.sql_cursors == [], stmt
+    # ...and the DECLARE TABLE case still lands in the other bucket.
+    prog = parse_program(_wrap(
+        "       0000-MAIN.\n"
+        "           EXEC SQL DECLARE T_ACCT TABLE ( A CHAR(8) ) END-EXEC\n"
+        "           STOP RUN.\n"
+    ))
+    assert [e["table"] for e in prog.declared_tables] == ["T_ACCT"]
+
+
+def test_malformed_declare_does_not_run_off_the_token_stream():
+    """GUARD (passes before and after). A truncated attribute run must return None
+    rather than raise; the skip loop's bound is what makes that safe."""
+    prog = parse_program(_wrap(
+        "       0000-MAIN.\n"
+        "           EXEC SQL DECLARE CSR1 NO SCROLL END-EXEC\n"
+        "           STOP RUN.\n"
+    ))
+    assert prog.sql_cursors == []

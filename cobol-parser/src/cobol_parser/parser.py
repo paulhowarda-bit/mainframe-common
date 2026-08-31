@@ -405,7 +405,7 @@ def _scan_sql_declarations(lines) -> Tuple[List[dict], List[dict]]:
     column-list-less INSERT its table's declared order, wherever the DECLARE lives.
 
     Returns ``(cursors, tables)``:
-      cursors: [{cursor, selectList, table, line, member}]
+      cursors: [{cursor, selectList, selectDerivations, table, line, member}]
       tables:  [{table, columns, line, member}]
     """
     cursors: List[dict] = []
@@ -1922,15 +1922,46 @@ class StmtParser:
         "CONTINUE",
     })
 
-    @staticmethod
-    def _exec_declare_cursor(toks: List[Token]) -> Optional[str]:
+    # Db2 cursor attributes that may sit between the cursor NAME and the CURSOR
+    # keyword: [ASENSITIVE | INSENSITIVE | SENSITIVE STATIC | SENSITIVE DYNAMIC]
+    # [NO SCROLL | SCROLL] CURSOR. Holdability and returnability (WITH HOLD,
+    # WITH RETURN, WITH/WITHOUT ROWSET POSITIONING) come AFTER the CURSOR keyword and
+    # so do NOT belong here - adding them would only let a malformed statement slide.
+    _DECLARE_ATTRS = frozenset({
+        "ASENSITIVE", "INSENSITIVE", "SENSITIVE", "STATIC", "DYNAMIC", "NO", "SCROLL",
+    })
+
+    @classmethod
+    def _exec_declare_cursor(cls, toks: List[Token]) -> Optional[str]:
         """`DECLARE c CURSOR ...` -> c. None for the other DECLAREs (``... TABLE``,
-        ``... STATEMENT``), which name no cursor and hold no select list to zip."""
+        ``... STATEMENT``, ``... GLOBAL TEMPORARY TABLE``), which name no cursor and
+        hold no select list to zip.
+
+        Db2 allows an attribute run between the cursor NAME and the CURSOR keyword -
+        `DECLARE C1 INSENSITIVE SCROLL CURSOR FOR SELECT ...` - exactly as it allows a
+        positioning run between FETCH and its cursor name (`_FETCH_POS`). Binding on
+        `toks[i+2] == CURSOR` refused the whole statement, and refusing it is not a
+        harmless miss: no cursor is registered, so every FETCH on it reports
+        `cursor-declare-missing` and blames an absent copybook for a DECLARE that is
+        sitting in the source.
+        """
         for i, t in enumerate(toks):
             if t.kind == "word" and t.up == "DECLARE":
-                if (i + 2 < len(toks) and toks[i + 1].kind == "word"
-                        and toks[i + 2].kind == "word" and toks[i + 2].up == "CURSOR"):
-                    return toks[i + 1].up
+                if not (i + 2 < len(toks) and toks[i + 1].kind == "word"):
+                    return None
+                name = toks[i + 1].up
+                # The NAME is positional and is never consulted against the attribute
+                # set, so a cursor legitimately named SCROLL or DYNAMIC still binds.
+                j = i + 2
+                while (j < len(toks) and toks[j].kind == "word"
+                        and toks[j].up in cls._DECLARE_ATTRS):
+                    j += 1
+                if j < len(toks) and toks[j].kind == "word" and toks[j].up == "CURSOR":
+                    return name
+                # A `return`, not a `continue`: both call sites hand this the tokens of
+                # exactly ONE EXEC SQL block, so there is never a second DECLARE to
+                # find, and falling through would let a DECLARE TABLE match whatever
+                # came after it.
                 return None
         return None
 
