@@ -352,9 +352,67 @@ def parse_data_division(lines: List[CodeLine]):
     return items, by_name
 
 
+#: A Db2 VARCHAR host variable is declared as a group with a 2-byte length item and a
+#: character item, both at level 49. The precompiler treats that group as ONE host
+#: variable filling ONE column and never sends its subordinates.
+_VARCHAR_LEVEL = 49
+
+
+def _varchar_pair_at(items: List[DataItem], start: int) -> bool:
+    """True when ``items[start]`` is a group whose ONLY subordinates are a Db2 VARCHAR
+    length/data pair - so the group is ONE host variable filling ONE column, and the
+    precompiler never sends its two subordinates.
+
+    The gate is the LEVEL NUMBER, because that is what makes the declaration a VARCHAR
+    rather than a coincidence of shape. A two-field group at 05/10 is a plain group and
+    MUST keep expanding, or a group that really does fill two columns is silently
+    collapsed - which is the one way this could invent lineage rather than recover it.
+
+    Only ONE child need sit at 49: three declarations in two Db2 stored procedures pair
+    a level-49 length item with a level-05 or level-10 character item and are real
+    VARCHAR parameters (FBSPMG04.CBL:133-135, FBSPMG08.CBL:296-298, both `01` groups).
+
+    **Deliberately not gated on the PICTURE.** A `S9(4) COMP` + `X(n)` test would miss
+    real VARCHARs whose length item carries no USAGE at all (IXPI0009.CBL:39
+    `49 SUSR-LENGTH PIC S9(4).`, FTNR119.CBL:744 `49 WS-SEC-DS-LEN PIC 9(4) VALUE
+    ZEROES.`). Any picture test is a separate opt-in signal, and would have to accept
+    DISPLAY as well as COMP/COMP-4/COMP-5/BINARY.
+
+    **Known limitation:** the scan breaks on ``it.level <= g.level``, so the non-49 child
+    must sit strictly BELOW the group's own level. A `10 GRP.` / `49 ...-LEN` /
+    `05 ...-TEXT` member is NOT detected - the `05` ends the run before the pair is
+    complete. Both estate declarations above are at `01`, where `05`/`10` are genuinely
+    subordinate, so neither is missed; the shape is left as a stated gap rather than
+    papered over, because widening the run past a lower level number would break the
+    positional walk everything else here depends on.
+
+    Cheap despite being called from inside the walk: it returns on the FIRST subordinate
+    group and on the THIRD elementary child, so it reads at most three items for anything
+    that is not a VARCHAR pair. The walk does not become quadratic.
+    """
+    g = items[start]
+    kids: List[DataItem] = []
+    for it in items[start + 1:]:
+        if it.level in (66, 77) or it.level <= g.level:
+            break
+        if it.level == 88:
+            continue                        # a condition name on the length or the text
+        if it.is_group or it.redefines:
+            return False                    # a real structure, not a length/data pair
+        kids.append(it)
+        if len(kids) > 2:
+            return False
+    return len(kids) == 2 and _VARCHAR_LEVEL in (kids[0].level, kids[1].level)
+
+
 def elementary_subordinates(items: List[DataItem], name: str) -> Optional[List[str]]:
-    """The elementary items DB2 expands a GROUP-level host variable into, in declaration
-    order - or ``None`` when ``name`` is not a group, so a caller leaves it as written.
+    """The host variables DB2 expands a GROUP-level host variable into, in declaration
+    order - or ``None`` when ``name`` is not a group, or is itself one host variable, so
+    a caller leaves it as written.
+
+    Every name returned is elementary EXCEPT a Db2 VARCHAR length/data pair, which is
+    emitted as the GROUP's own name because that is the one host variable the
+    precompiler sends for it (see ``_varchar_pair_at``).
 
     `EXEC SQL FETCH c INTO :BSTI-TRNF-INIT` names a 01-level group, and the DB2
     precompiler rewrites it into every elementary item under that group before the
@@ -377,7 +435,9 @@ def elementary_subordinates(items: List[DataItem], name: str) -> Optional[List[s
     - **88-level** condition names are not storage; the walk steps over them.
     - **66/77** are always top-level, so either ENDS the group's run (a bare ``level >
       group.level`` test reads `77` as a subordinate of an `01`).
-    - A **nested group** is recursed into, never itself emitted.
+    - A **nested group** is recursed into, never itself emitted - UNLESS it is a VARCHAR
+      length/data pair, which is one host variable and is emitted under its own name
+      while its two subordinates are skipped.
     - An **OCCURS** item is one host variable, not N copies (DB2 takes the first element).
 
     Returns None rather than an empty list when nothing survives the exclusions (a group
@@ -391,10 +451,19 @@ def elementary_subordinates(items: List[DataItem], name: str) -> Optional[List[s
     if start is None:
         return None
     group = items[start]
+    # `SELECT CMT INTO :BE-CMT-X` names ONE host variable and fills ONE column. None is
+    # the existing "keep the source spelling" answer, which both callers already handle
+    # (parser._expand_structures, parser._values_slots).
+    if _varchar_pair_at(items, start):
+        return None
     out: List[str] = []
     # The level of a REDEFINES item whose whole subtree is being skipped.
     redefined_at: Optional[int] = None
-    for it in items[start + 1:]:
+    # The level of a VARCHAR group whose pair is being skipped. Modelled on
+    # `redefined_at` because this walk is a FLAT positional scan; "do not descend" has to
+    # be a level tracker, there being no recursion to return from.
+    varchar_at: Optional[int] = None
+    for i, it in enumerate(items[start + 1:], start + 1):
         if it.level == 88:
             continue                       # a condition name, not storage
         if it.level in (66, 77):
@@ -405,8 +474,19 @@ def elementary_subordinates(items: List[DataItem], name: str) -> Optional[List[s
             if it.level > redefined_at:
                 continue                   # still inside the REDEFINES subtree
             redefined_at = None
+        if varchar_at is not None:
+            if it.level > varchar_at:
+                continue                   # the length/data pair, already accounted for
+            varchar_at = None
         if it.redefines:
             redefined_at = it.level
+            continue
+        if it.is_group and _varchar_pair_at(items, i):
+            # A VARCHAR MEMBER of a bigger record: `SELECT ... INTO :BE-REC` sends this
+            # group's OWN name for one column, and its subordinates for none.
+            varchar_at = it.level
+            if it.name != "FILLER":
+                out.append(it.name)
             continue
         if it.name == "FILLER" or it.is_group:
             continue
