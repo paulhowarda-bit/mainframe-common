@@ -5,8 +5,8 @@ called program, a DDL) lives somewhere only the estate knows: a SYSLIB concatena
 source-control library, a network share. This tool has no business guessing at that, and
 never does - it asks ``mf_fetch`` and reports what came back.
 
-``cast_clients.mf_fetch.fetch_artifact(name, type=, copy=)`` is the default client, so a
-normal run needs no wiring. It returns a dict this module keeps whole:
+``mf_fetch.fetch_artifact(name, type=, copy=)`` is the default client, so a normal run
+needs no wiring. It returns a dict this module keeps whole:
 
     {artifact_name, detected_type, found, copied_to, source_path,
      source_location, alternatives}
@@ -44,7 +44,7 @@ logger = logging.getLogger(__name__)
 # The estate client this tool is built against. Imported lazily (and only once) so the
 # package still imports - and every non-fetching code path still runs - on a machine
 # that has no estate client installed.
-DEFAULT_FETCHER = "cast_clients.mf_fetch:fetch_artifact"
+DEFAULT_FETCHER = "mf_fetch:fetch_artifact"
 
 # Keys carrying member TEXT, and keys carrying a PATH, in the order clients use them.
 # NOT "source": that is the member's ORIGIN everywhere else in this module (see
