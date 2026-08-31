@@ -448,6 +448,16 @@ def _scan_sql_declarations(lines) -> Tuple[List[dict], List[dict]]:
     return cursors, tables
 
 
+# Words that can legally follow FROM and are NOT the table: a data-change table
+# reference (`FROM FINAL TABLE (INSERT ...)`, and its OLD/NEW forms) and a table
+# function (`FROM TABLE (f(...))`). Taking one of these as the table name mints a
+# shared anchor identity for a KEYWORD, which is worse than admitting the name is
+# unknown - a consumer can handle "unknown", but not a table called FINAL, which
+# two programs would then MERGE onto as if it were the same one.
+_NOT_A_TABLE = frozenset({"FINAL", "OLD", "NEW", "TABLE", "XMLTABLE", "LATERAL",
+                          "UNNEST", "SELECT"})
+
+
 def _declare_from_table(block: List[Token]) -> Optional[str]:
     """The FROM table of a cursor DECLARE's select, at paren depth 0 (a literal in the
     select list is a single token here, so it cannot supply a phantom FROM)."""
@@ -1317,6 +1327,7 @@ class StmtParser:
         columns: List[dict] = []
         select_list: List[Optional[str]] = []
         column_note: Optional[str] = None
+        column_unresolved: Optional[str] = None
         cursor: Optional[str] = None
         cursor_for_kind: Optional[str] = None
         cursor_for_statement: Optional[str] = None
@@ -1351,7 +1362,7 @@ class StmtParser:
                 # DECLARE, so it is correlated later (see interface._cursor_columns).
                 if verb == "SELECT":
                     select_list, select_derivations, column_note =                         self._exec_select_columns(toks)
-                    columns, column_note = self._correlate(
+                    columns, column_note, column_unresolved = self._correlate(
                         select_list, into_vars, column_note, select_derivations)
                 else:
                     # The cursor named here is what links this FETCH to the DECLARE
@@ -1366,10 +1377,11 @@ class StmtParser:
                     select_list, select_derivations, column_note =                         self._exec_select_columns(toks)
                     cursor_for_kind, cursor_for_statement =                         self._exec_declare_for(toks)
             elif verb == "UPDATE":
-                columns = self._exec_update_sets(toks)
+                columns, column_note, column_unresolved = \
+                    self._exec_update_sets(toks)
                 where_vars = self._exec_where_vars(toks)
             elif verb == "INSERT":
-                columns, column_note, table, values_list = \
+                columns, column_note, table, values_list, column_unresolved = \
                     self._exec_insert_columns(toks, expanded_structures)
                 # An `INSERT ... SELECT ... WHERE` filters the rows it copies. A plain
                 # VALUES insert has no WHERE at all, and this stays empty.
@@ -1386,7 +1398,8 @@ class StmtParser:
                         target=target, dynamic=dynamic,
                         host_vars=host_vars, conditions=conditions,
                         into_vars=into_vars, columns=columns, select_list=select_list,
-                        column_note=column_note, cursor=cursor,
+                        column_note=column_note,
+                        column_unresolved=column_unresolved, cursor=cursor,
                         table=table, values_list=values_list,
                         where_vars=where_vars,
                         select_derivations=select_derivations,
@@ -1650,16 +1663,44 @@ class StmtParser:
         slot is made of, so a lost source column is recoverable as provenance. A note
         means the list cannot be correlated at all.
         """
+        # The select list of THIS statement is the one at paren depth 0. A CTE's inner
+        # select and a scalar subquery in the select list both sit deeper, and handing
+        # the caller one of those returns ANOTHER statement's column list - which then
+        # fails the arity gate and costs the whole statement its mapping. Same rule
+        # `_declare_from_table` already applies to the FROM table.
+        depth = 0
         start = None
+        shallowest = None        # fallback: a fullselect wrapped entirely in parens
         for i, t in enumerate(toks):
-            if t.kind == "word" and t.up == "SELECT":
-                start = i + 1
-                break
+            if t.kind == "punct" and t.text == "(":
+                depth += 1
+            elif t.kind == "punct" and t.text == ")":
+                depth -= 1
+            elif t.kind == "word" and t.up == "SELECT":
+                if depth == 0:
+                    start = i + 1
+                    break
+                if shallowest is None or depth < shallowest[0]:
+                    shallowest = (depth, i + 1)
+        if start is None and shallowest is not None:
+            # `DECLARE c CURSOR FOR (SELECT ...)` has no depth-0 SELECT at all.
+            # Returning [] here would convert a loud arity refusal into a silent
+            # empty mapping with no note - strictly worse than today.
+            start = shallowest[1]
         if start is None:
             return [], [], None
+        # Terminate at the first INTO/FROM at the SELECT's OWN depth, so a `FROM`
+        # inside a subquery in the select list cannot truncate the list. `depth` is
+        # counted from `start`, so it stays relative to whichever SELECT was chosen.
+        depth = 0
         end = len(toks)
         for i in range(start, len(toks)):
-            if toks[i].kind == "word" and toks[i].up in ("INTO", "FROM"):
+            t = toks[i]
+            if t.kind == "punct" and t.text == "(":
+                depth += 1
+            elif t.kind == "punct" and t.text == ")":
+                depth -= 1
+            elif depth == 0 and t.kind == "word" and t.up in ("INTO", "FROM"):
                 end = i
                 break
         sel = toks[start:end]
@@ -1675,34 +1716,114 @@ class StmtParser:
         return columns, derivations, None
 
     @classmethod
-    def _exec_update_sets(cls, toks: List[Token]) -> List[dict]:
+    def _exec_update_sets(cls, toks: List[Token]
+                          ) -> Tuple[List[dict], Optional[str], Optional[str]]:
         """`UPDATE t SET c = :h, c2 = :h2` -> the pairs. Explicit, not positional: the
-        highest-fidelity shape there is."""
+        highest-fidelity shape there is.
+
+        Returns ``(columns, note, unresolved)``. A host variable this cannot pair is
+        never dropped in SILENCE, which is the one outcome the surrounding code is
+        designed to avoid: where the target column is known, the variables inside the
+        expression become explicit `derived` entries - the rule `_correlate` already
+        applies on the SELECT side, for the reason argued there - and where the target
+        cannot be identified at all, the note and its token say so.
+
+        `SET C = CURRENT TIMESTAMP` still contributes nothing and still says nothing:
+        it names no host variable, so there is no field whose fate needs explaining.
+        """
         start = None
         for i, t in enumerate(toks):
             if t.kind == "word" and t.up == "SET":
                 start = i + 1
                 break
         if start is None:
-            return []
+            return [], None, None
+        # The SET list ends at the WHERE at ITS OWN depth. Under a flat scan
+        # `SET c = (SELECT x FROM y WHERE z = :h1), d = :h2 WHERE k = :f` ends inside
+        # the subquery, losing `d = :h2` entirely.
+        depth = 0
         end = len(toks)
         for i in range(start, len(toks)):
-            if toks[i].kind == "word" and toks[i].up == "WHERE":
+            t = toks[i]
+            if t.kind == "punct" and t.text == "(":
+                depth += 1
+            elif t.kind == "punct" and t.text == ")":
+                depth -= 1
+            elif depth == 0 and t.kind == "word" and t.up == "WHERE":
                 end = i
                 break
         out: List[dict] = []
+        unmapped = 0
         for item in cls._split_top_commas(toks[start:end]):
             eq = next((j for j, t in enumerate(item)
                        if t.kind == "punct" and t.text == "="), None)
             if eq is None:
                 continue
             col = cls._column_of(item[:eq])
+            if col is None:
+                # The row-value form `SET (C1, C2) = (SELECT a, b FROM t)`: a `derived`
+                # entry has no single column to sit at, so the reason goes in the note.
+                unmapped += 1
+                continue
             # The same slot rule the VALUES list uses, so `SET C = :GRP . FLD` keeps its
             # mapping and `SET C = CURRENT TIMESTAMP` still has none.
             hv = cls._host_var_of(item[eq + 1:])
-            if col and hv is not None:
+            if hv is not None:
                 out.append({"column": col, "hostVar": hv})
+                continue
+            # A variable inside the expression's own WHERE is a row SELECTOR, not a
+            # value written to `col` - `SET BAL = (SELECT TOT FROM L WHERE REF = :R)`
+            # writes TOT, and :R only picks the row. `_exec_where_vars` is already the
+            # authority on which those are, so subtract exactly its answer rather than
+            # deciding it twice (it carries colons; `columns[].hostVar` does not).
+            rhs = item[eq + 1:]
+            selectors = {v.lstrip(":") for v in cls._exec_where_vars(rhs)}
+            kind = cls._expression_kind(rhs)
+            for hvar in cls._host_vars_in(rhs):
+                if hvar in selectors:
+                    continue
+                out.append({"column": None, "hostVar": hvar, "derived": True,
+                            "expression": kind, "derivedFrom": [col]})
+        if unmapped and not out:
+            # Only when the statement resolved NOTHING. `columnsUnresolved` means the
+            # recovery FAILED (interface._note), and a statement that mapped some of
+            # its columns has not failed - tokenising it would put the mappings beside
+            # it out of reach of a consumer that skips on the token. The prose note
+            # still reports the gap either way.
+            return out, (f"{unmapped} SET assignment(s) name no single target column "
+                         f"(a row-value `SET (C1, C2) = ...`) - the host variables in "
+                         f"them fill no column this can identify"), \
+                "set-expression-unmapped"
+        if unmapped:
+            return out, (f"{unmapped} SET assignment(s) name no single target column "
+                         f"(a row-value `SET (C1, C2) = ...`) - the host variables in "
+                         f"them fill no column this can identify"), None
+        return out, None, None
+
+    @classmethod
+    def _host_vars_in(cls, toks: List[Token]) -> List[str]:
+        """Every host variable named anywhere in a token run, at any depth, in source
+        order and without repeats.
+
+        The BARE name, matching `columns[].hostVar`. `_exec_where_vars` carries the
+        leading colon because it feeds `where_vars`, which is a different field with a
+        different convention - joining the two would be a silent shape change."""
+        out: List[str] = []
+        for idx in range(len(toks)):
+            hv = cls._host_var_at(toks, idx)
+            if hv is not None and hv[0] not in out:
+                out.append(hv[0])
         return out
+
+    @classmethod
+    def _expression_kind(cls, item: List[Token]) -> str:
+        """A COARSE label for what fills a SET target, at the granularity
+        `_derivation_of` already uses on the SELECT side. Only the subselect case is
+        added here: on the select-list side that shape is rare enough to fall through
+        to the generic label, but it is the whole point of a row-value UPDATE."""
+        if any(t.kind == "word" and t.up == "SELECT" for t in item):
+            return "SUBSELECT"
+        return (cls._derivation_of(item) or {}).get("expression") or "expression"
 
     @classmethod
     def _exec_where_vars(cls, toks: List[Token]) -> List[str]:
@@ -1779,6 +1900,8 @@ class StmtParser:
         clause, not one long name."""
         if not item or item[0].kind != "word":
             return None
+        if item[0].up in _NOT_A_TABLE:
+            return None
         parts = [item[0].up]
         i = 1
         while (i + 1 < len(item)
@@ -1817,7 +1940,8 @@ class StmtParser:
 
     def _exec_insert_columns(self, toks: List[Token], expanded: List[str]
                              ) -> Tuple[List[dict], Optional[str],
-                                        Optional[str], List[Optional[str]]]:
+                                        Optional[str], List[Optional[str]],
+                                        Optional[str]]:
         """`INSERT INTO t (c1, c2) VALUES (:h1, CURRENT TIMESTAMP, :h2)` -> the pairs.
 
         Positional, like `SELECT ... INTO`: the Nth VALUES item fills the Nth column. A
@@ -1829,31 +1953,37 @@ class StmtParser:
         program that only ever inserts contributes no column evidence at all, and its
         rows look unrelated to the rows every reader of that table selects.
 
-        Returns ``(columns, note, table, values_list)``. The last two are set only for
-        an INSERT with NO column list: the columns then live in the table's DECLARE
-        TABLE / DCLGEN, which is a whole-program fact - so this site records the table
-        and the ordered VALUES slots, and build time finishes the zip
-        (statechart._correlate_inserts). Group names expanded on the way are appended to
+        Returns ``(columns, note, table, values_list, unresolved)``. ``table`` and
+        ``values_list`` are set only for an INSERT with NO column list: the columns then
+        live in the table's DECLARE TABLE / DCLGEN, which is a whole-program fact - so
+        this site records the table and the ordered VALUES slots, and build time
+        finishes the zip (statechart._correlate_inserts). ``unresolved`` is the stable
+        TOKEN for the same fact ``note`` states in prose, so a consumer can branch on
+        the reason without matching on wording. It stays None for the no-column-list
+        case: that one is not a refusal yet, and build time either resolves it or
+        tokenises it there.  Group names expanded on the way are appended to
         ``expanded``, which the statement carries.
         """
         i_into = next((i for i, t in enumerate(toks)
                        if t.kind == "word" and t.up == "INTO"), None)
         if i_into is None:
-            return [], None, None, []
+            return [], None, None, [], None
         i_values = next((i for i, t in enumerate(toks)
                          if t.kind == "word" and t.up == "VALUES"), None)
         if i_values is None:
             return [], ("INSERT ... SELECT / fullselect: the values come from a query "
                         "rather than from host variables, so no column<->field mapping "
-                        "exists at this site - the source table's lineage does"), None, []
+                        "exists at this site - the source table's lineage does"), None, \
+                [], "insert-from-fullselect"
         col_toks = self._paren_group(toks, i_into + 1, i_values)
         if col_toks is None:
             table = self._table_name(toks[i_into + 1:i_values])
             values = self._values_slots(self._paren_group(toks, i_values + 1), expanded)
-            return [], self.INSERT_NO_COLUMN_LIST, table, values
+            return [], self.INSERT_NO_COLUMN_LIST, table, values, None
         val_toks = self._paren_group(toks, i_values + 1)
         if val_toks is None:
-            return [], "INSERT VALUES list is not parseable here - verify by hand",                 None, []
+            return [], "INSERT VALUES list is not parseable here - verify by hand", \
+                None, [], "values-unparseable"
         cols = [self._column_of(item) for item in self._split_top_commas(col_toks)]
         vals = self._values_slots(val_toks, expanded)
         if len(cols) != len(vals):
@@ -1861,7 +1991,7 @@ class StmtParser:
                         f"structures already expanded: not correlatable - a group whose "
                         f"data division entry did not arrive cannot be expanded, and a "
                         f"slot that is not one host variable fills no single column "
-                        f"- verify by hand"), None, []
+                        f"- verify by hand"), None, [], "count-mismatch"
         out: List[dict] = []
         unsourced: List[str] = []
         for col, hv in zip(cols, vals):
@@ -1872,10 +2002,13 @@ class StmtParser:
             else:
                 unsourced.append(col)
         if unsourced:
+            # Deliberately NO token: some columns mapped, so this is a success with a
+            # documented gap, not a failed recovery (see `_exec_update_sets`).
             return out, (f"{len(unsourced)} column(s) written from a literal or "
                          f"expression rather than a host variable "
-                         f"({', '.join(unsourced)}) - no program field maps to them"),                 None, []
-        return out, None, None, []
+                         f"({', '.join(unsourced)}) - no program field maps to them"), \
+                None, [], None
+        return out, None, None, [], None
 
     @classmethod
     def _host_var_slot(cls, item: List[Token]) -> Optional[Tuple[str, Optional[str]]]:
@@ -2042,7 +2175,7 @@ class StmtParser:
     def _correlate(columns: List[Optional[str]], into_vars: List[str],
                    note: Optional[str],
                    derivations: Optional[List[Optional[dict]]] = None
-                   ) -> Tuple[List[dict], Optional[str]]:
+                   ) -> Tuple[List[dict], Optional[str], Optional[str]]:
         """Zip a select list against the INTO host variables - ONLY when the counts prove
         the correspondence.
 
@@ -2059,14 +2192,15 @@ class StmtParser:
         entry did not arrive, most of all - and that stays refused.
         """
         if note:
-            return [], note
+            return [], note, None
         if not columns or not into_vars:
-            return [], None
+            return [], None, None
         if len(columns) != len(into_vars):
             return [], (f"{len(columns)} column(s) vs {len(into_vars)} host variable(s), "
                         f"host structures already expanded and null indicators already "
                         f"attached: not correlatable - a group whose data division entry "
-                        f"did not arrive cannot be expanded - verify by hand")
+                        f"did not arrive cannot be expanded - verify by hand"), \
+                "count-mismatch"
         # A derived slot (`SELECT 'Y'`, `COUNT(*)`, `A + B`) fills its host variable
         # from something that is not a column, so it gets an EXPLICIT `derived` entry
         # rather than silence: without one, "an aggregate fills this field by
@@ -2091,10 +2225,12 @@ class StmtParser:
             mapped.append(entry)
         derived = [h for c, h in zip(columns, into_vars) if c is None]
         if derived:
+            # No token: `mapped` is populated, so the correlation SUCCEEDED and the
+            # derived slots are a documented gap inside it, not a failure.
             return mapped, (f"{len(derived)} select-list item(s) name no column (literal "
                             f"or expression) - the value reaching "
-                            f"{', '.join(derived)} has no column identity")
-        return mapped, None
+                            f"{', '.join(derived)} has no column identity"), None
+        return mapped, None, None
 
     _INTO_END = ("FROM", "WHERE", "ORDER", "GROUP", "HAVING", "FOR")
 

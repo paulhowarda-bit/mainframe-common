@@ -61,7 +61,11 @@ FORMAT = "cobol-parser"
 #      forKind / forStatement keys on Program.sql_cursors: WHICH form of `FOR` a cursor
 #      DECLARE used. Absent (a v<=4 bundle) means UNKNOWN, not "select" - a reader must
 #      not treat a missing field as evidence that the cursor is static.
-VERSION = 5
+#   6  ExecStmt.column_unresolved: the machine-readable TOKEN for why a column mapping
+#      could not be made, beside the prose already in `column_note`. Absent (a v<=5
+#      bundle) means the producer had no token to give, NOT that the statement
+#      correlated - `column_note` is still the thing that says whether it failed.
+VERSION = 6
 #: The producer name this package writes. An external producer (a different parser
 #: emitting the same contract) writes its own, so a reader can tell whose parse it is.
 PRODUCER = "cobol-parser-python"

@@ -226,6 +226,23 @@ def test_continuation_of_a_plain_word_still_joins_with_a_space():
     assert "MOVE WS-A TO WS-B." in text
 
 
+def test_continuation_resuming_a_word_in_column_8_joins_with_no_space():
+    """The other half of the pair above. A name that ran out of room at column 72
+    resumes in column 8 with NOTHING before it, and IBM joins it to the last nonblank
+    character with no separator. Joining with a space fabricated a table PRODDB.CUS
+    that does not exist and lost the PRODDB.CUSTOMER that does - the one continuation
+    shape that corrupts rather than omits, so no downstream index can spot it."""
+    src = (
+        "       PROCEDURE DIVISION.\n"
+        "       0000-MAIN.\n"
+        "           EXEC SQL DELETE FROM PRODDB.CUS\n"
+        "      -TOMER WHERE CUST_ID = :X END-EXEC.\n"
+    )
+    text = normalize(src, SourceFormat.FIXED)[-1].text
+    assert "PRODDB.CUSTOMER" in text
+    assert "PRODDB.CUS TOMER" not in text
+
+
 def test_continued_literal_keeps_blanks_that_belong_to_it():
     """Blanks through column 72 are part of a continued literal, so they must not be
     right-stripped away before the stitch."""

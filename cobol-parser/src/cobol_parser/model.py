@@ -162,6 +162,13 @@ class ExecStmt(Stmt):
     # field that came from nowhere.
     select_derivations: List[Optional[dict]] = field(default_factory=list)
     column_note: Optional[str] = None     # why the columns could NOT be correlated
+    # The SAME fact as `column_note`, as a STABLE TOKEN rather than prose. A consumer
+    # must be able to branch on the reason without matching on wording that was never
+    # a contract; `cobol_xstate.interface._fetch_columns` already returns exactly this
+    # for the FETCH arity case, as "count-mismatch", and the two parser-side paths had
+    # no field to put one in - so the same failure published a machine-readable reason
+    # down one code path and prose only down the other two.
+    column_unresolved: Optional[str] = None
     # The cursor a FETCH reads, resolved from tokens (a rowset FETCH buries the name
     # behind positioning keywords). It is the join back to the DECLARE that holds the
     # columns, and it names the endpoint the FETCH crosses.

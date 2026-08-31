@@ -316,8 +316,20 @@ def normalize(source: str, fmt: Optional[SourceFormat] = None) -> List[CodeLine]
                 # continuation, so append with no separator.
                 buf = buf + body
             else:
-                # An ordinary continued word/statement: join with one space.
-                buf = buf.rstrip() + " " + body
+                # Column 8 decides, and nothing else can. Text with NOTHING before
+                # it is resuming a word that ran out of room at column 72, and IBM
+                # joins it to the last nonblank character with no intervening space;
+                # text that begins after blanks is continuing the statement, where
+                # those blanks ARE the separator. `body` is already lstripped, so it
+                # cannot tell the two apart - which is why an unconditional rule in
+                # either direction corrupts one of them: joining always with a space
+                # fabricates `PRODDB.CUS TOMER` out of a split table name, joining
+                # always without one fabricates `MOVE WS-ATO WS-B`. `_fixed_code`
+                # leaves column 8 intact for exactly this decision.
+                if code[:1].isspace():
+                    buf = buf.rstrip() + " " + body
+                else:
+                    buf = buf.rstrip() + body
             continue
 
         flush()

@@ -775,3 +775,235 @@ def test_non_cursor_declares_carry_no_for_form():
     ))
     assert prog.sql_cursors == []
     assert [e["table"] for e in prog.declared_tables] == ["T_ACCT"]
+
+
+# --------------------------------------------------------------------------- #
+# Db2 column mapping: paren depth, refusal TOKENS, and the shapes that used to
+# fall out in silence. (Upstream ledger batch 2, items 9, 10, 11 and 13.)
+# --------------------------------------------------------------------------- #
+
+
+def test_a_cte_declare_returns_the_outer_select_list():
+    """A CTE's inner select sits at paren depth 1. Returning ITS columns hands the
+    caller another statement's list, which then fails the FETCH arity gate and costs
+    the whole statement its mapping."""
+    prog = parse_program(_wrap(
+        "       0000-MAIN.\n"
+        "           EXEC SQL DECLARE CSR1 CURSOR FOR\n"
+        "             WITH X (P, Q) AS (SELECT P, Q FROM T1)\n"
+        "             SELECT C, D, E FROM T2\n"
+        "           END-EXEC.\n"
+        "           STOP RUN.\n"
+    ))
+    assert prog.paragraphs[0].statements[0].select_list == ["C", "D", "E"]
+
+
+def test_a_scalar_subquery_in_the_select_list_does_not_truncate_it():
+    """Three slots, not one: the subquery's own FROM sits deeper than the select list
+    it lives in, so it must not terminate the scan."""
+    prog = parse_program(_wrap(
+        "       0000-MAIN.\n"
+        "           EXEC SQL SELECT A, (SELECT MAX(X) FROM T2), C\n"
+        "             INTO :H1, :H2, :H3 FROM T1 END-EXEC.\n"
+        "           STOP RUN.\n"
+    ))
+    st = prog.paragraphs[0].statements[0]
+    assert st.select_list == ["A", None, "C"]
+    assert [c.get("hostVar") for c in st.columns] == ["H1", "H2", "H3"]
+
+
+def test_a_parenthesised_fullselect_still_yields_its_columns():
+    """A fullselect wrapped entirely in parens has NO depth-0 SELECT. Returning []
+    here would convert a loud arity refusal into a silent empty mapping."""
+    prog = parse_program(_wrap(
+        "       0000-MAIN.\n"
+        "           EXEC SQL DECLARE CSR1 CURSOR FOR (SELECT A, B FROM T)\n"
+        "           END-EXEC.\n"
+        "           STOP RUN.\n"
+    ))
+    assert prog.paragraphs[0].statements[0].select_list == ["A", "B"]
+
+
+def test_an_ordinary_select_is_unchanged():
+    """Regression guard: the depth-0 path is what almost every statement takes."""
+    prog = parse_program(_wrap(
+        "       0000-MAIN.\n"
+        "           EXEC SQL SELECT A, B INTO :H1, :H2 FROM T END-EXEC.\n"
+        "           STOP RUN.\n"
+    ))
+    st = prog.paragraphs[0].statements[0]
+    assert st.select_list == ["A", "B"]
+    assert st.columns == [{"column": "A", "hostVar": "H1"},
+                          {"column": "B", "hostVar": "H2"}]
+    assert st.column_note is None and st.column_unresolved is None
+
+
+def test_an_insert_arity_refusal_publishes_a_token_not_only_prose():
+    """A consumer must be able to branch on the REASON without pattern-matching on
+    prose that was never a contract."""
+    prog = parse_program(_wrap(
+        "       0000-MAIN.\n"
+        "           EXEC SQL INSERT INTO T (A, B)\n"
+        "             VALUES (:H1, :H2, :H3) END-EXEC.\n"
+        "           STOP RUN.\n"
+    ))
+    st = prog.paragraphs[0].statements[0]
+    assert st.column_unresolved == "count-mismatch"
+    assert st.column_note and st.columns == []
+
+
+def test_a_select_into_arity_refusal_publishes_a_token():
+    """The same failure down the other parser path, carrying the same token."""
+    prog = parse_program(_wrap(
+        "       0000-MAIN.\n"
+        "           EXEC SQL SELECT A, B INTO :H1, :H2, :H3 FROM T END-EXEC.\n"
+        "           STOP RUN.\n"
+    ))
+    st = prog.paragraphs[0].statements[0]
+    assert st.column_unresolved == "count-mismatch"
+
+
+def test_an_insert_from_a_fullselect_publishes_its_own_token():
+    """Not an arity failure - a different reason, so a different token."""
+    prog = parse_program(_wrap(
+        "       0000-MAIN.\n"
+        "           EXEC SQL INSERT INTO T (A, B) SELECT P, Q FROM S END-EXEC.\n"
+        "           STOP RUN.\n"
+    ))
+    assert prog.paragraphs[0].statements[0].column_unresolved == "insert-from-fullselect"
+
+
+def test_an_unparseable_values_list_publishes_its_own_token():
+    """The third parser-side refusal wording. Untokenised it was the one reason a
+    consumer could only reach by matching prose, since unlike the other two it names
+    no counts to key on."""
+    prog = parse_program(_wrap(
+        "       0000-MAIN.\n"
+        "           EXEC SQL INSERT INTO T (A, B) VALUES :H END-EXEC.\n"
+        "           STOP RUN.\n"
+    ))
+    st = prog.paragraphs[0].statements[0]
+    assert st.column_unresolved == "values-unparseable"
+    assert st.column_note and st.columns == []
+
+
+def test_a_data_change_table_reference_is_not_a_table_named_final():
+    """FINAL is a keyword here. Minting a table identity for it is worse than
+    admitting the name is unknown: two programs would MERGE onto the same anchor."""
+    prog = parse_program(_wrap(
+        "       0000-MAIN.\n"
+        "           EXEC SQL DECLARE CSR1 CURSOR FOR\n"
+        "             SELECT A FROM FINAL TABLE (INSERT INTO T (A) VALUES (1))\n"
+        "           END-EXEC.\n"
+        "           STOP RUN.\n"
+    ))
+    assert prog.sql_cursors[0]["table"] is None
+
+
+def test_a_table_function_is_not_a_table_named_table():
+    prog = parse_program(_wrap(
+        "       0000-MAIN.\n"
+        "           EXEC SQL DECLARE CSR1 CURSOR FOR\n"
+        "             SELECT A FROM TABLE (F(:H2)) AS X\n"
+        "           END-EXEC.\n"
+        "           STOP RUN.\n"
+    ))
+    assert prog.sql_cursors[0]["table"] is None
+
+
+def test_a_real_table_whose_name_starts_with_a_keyword_is_unaffected():
+    """Only the EXACT word is refused. OLDER_ACCOUNTS is an ordinary table, and a
+    prefix match here would delete real edges."""
+    prog = parse_program(_wrap(
+        "       0000-MAIN.\n"
+        "           EXEC SQL DECLARE CSR1 CURSOR FOR\n"
+        "             SELECT A FROM OWNER.OLDER_ACCOUNTS\n"
+        "           END-EXEC.\n"
+        "           STOP RUN.\n"
+    ))
+    assert prog.sql_cursors[0]["table"] == "OWNER.OLDER_ACCOUNTS"
+
+
+def test_a_case_expression_on_the_right_hand_side_is_not_dropped_silently():
+    """SET C = CASE WHEN :H ... END names :H, and :H used to reach nothing at all -
+    no pair, no note, no token. Silence is the one outcome that must not survive."""
+    prog = parse_program(_wrap(
+        "       0000-MAIN.\n"
+        "           EXEC SQL UPDATE T SET C = CASE WHEN :H > X THEN 1 ELSE 2 END\n"
+        "             WHERE K = :F END-EXEC.\n"
+        "           STOP RUN.\n"
+    ))
+    st = prog.paragraphs[0].statements[0]
+    assert st.columns == [{"column": None, "hostVar": "H", "derived": True,
+                           "expression": "CASE", "derivedFrom": ["C"]}]
+    assert st.where_vars == [":F"]
+
+
+def test_an_arithmetic_set_yields_a_derived_entry():
+    """`SET Q = (Q + :H)` reads Q and writes Q, so :H is neither a plain pair nor a row
+    selector. It used to contribute nothing at all; now it is derived, naming the column
+    it feeds. The label is coarse on purpose - `_derivation_of`'s granularity - because
+    which operand supplied the value is not a fact the tokens prove."""
+    prog = parse_program(_wrap(
+        "       0000-MAIN.\n"
+        "           EXEC SQL UPDATE T SET Q = (Q + :H) WHERE K = :F END-EXEC.\n"
+        "           STOP RUN.\n"
+    ))
+    st = prog.paragraphs[0].statements[0]
+    assert st.columns == [{"column": None, "hostVar": "H", "derived": True,
+                           "expression": "expression", "derivedFrom": ["Q"]}]
+    assert st.where_vars == [":F"]
+    assert st.column_note is None and st.column_unresolved is None
+
+
+def test_a_row_value_set_reports_a_reason():
+    """No single target column for a `derived` entry to sit at, so the reason goes in
+    the note and its token instead."""
+    prog = parse_program(_wrap(
+        "       0000-MAIN.\n"
+        "           EXEC SQL UPDATE T SET (C1, C2) = (SELECT A, B FROM S)\n"
+        "             WHERE K = :F END-EXEC.\n"
+        "           STOP RUN.\n"
+    ))
+    st = prog.paragraphs[0].statements[0]
+    assert st.column_unresolved == "set-expression-unmapped"
+    assert st.column_note
+
+
+def test_a_plain_set_is_unchanged():
+    """Regression guard for the shape almost every UPDATE takes."""
+    prog = parse_program(_wrap(
+        "       0000-MAIN.\n"
+        "           EXEC SQL UPDATE T SET C = :H, C2 = :H2 WHERE K = :F END-EXEC.\n"
+        "           STOP RUN.\n"
+    ))
+    st = prog.paragraphs[0].statements[0]
+    assert st.columns == [{"column": "C", "hostVar": "H"},
+                          {"column": "C2", "hostVar": "H2"}]
+    assert st.column_note is None and st.column_unresolved is None
+
+
+def test_a_set_containing_a_subselect_with_its_own_where_keeps_later_assignments():
+    """The SET list ends at the WHERE at ITS OWN depth. A flat scan ends inside the
+    subquery and loses `D = :H2` entirely."""
+    prog = parse_program(_wrap(
+        "       0000-MAIN.\n"
+        "           EXEC SQL UPDATE T SET C = (SELECT X FROM Y WHERE Z = :H1),\n"
+        "             D = :H2 WHERE K = :F END-EXEC.\n"
+        "           STOP RUN.\n"
+    ))
+    st = prog.paragraphs[0].statements[0]
+    assert {"column": "D", "hostVar": "H2"} in st.columns
+
+
+def test_a_set_from_current_timestamp_still_says_nothing():
+    """It names no host variable, so there is no field whose fate needs explaining -
+    and inventing a note here would be noise, not recovery."""
+    prog = parse_program(_wrap(
+        "       0000-MAIN.\n"
+        "           EXEC SQL UPDATE T SET C = CURRENT TIMESTAMP WHERE K = :F END-EXEC.\n"
+        "           STOP RUN.\n"
+    ))
+    st = prog.paragraphs[0].statements[0]
+    assert st.columns == [] and st.column_note is None
+    assert st.column_unresolved is None
