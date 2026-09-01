@@ -11,8 +11,14 @@ Only genuinely shared flags live here. Anything that is one front-end's own busi
 from __future__ import annotations
 
 import argparse
+import logging
+from typing import Optional, Tuple
 
-from .artifact_service import DEFAULT_FETCHER
+from .artifact_service import DEFAULT_FETCHER, load_callable
+from .protocol import describe_synonym_resolver
+from .synonyms import SynonymLookup, read_synonym_map
+
+logger = logging.getLogger(__name__)
 
 
 def add_logging_args(p: argparse.ArgumentParser) -> None:
@@ -62,6 +68,54 @@ def add_retrieval_args(p: argparse.ArgumentParser) -> None:
                         "copybook search path still resolve; everything else is reported "
                         "as deliberately not looked for - which is NOT the same as the "
                         "estate having nothing, and is not reported as if it were.")
+
+
+def add_synonym_args(p: argparse.ArgumentParser) -> None:
+    """The two doors Db2 SYNONYM/ALIAS knowledge arrives by. Its own group, not part of
+    :func:`add_retrieval_args`: only a front-end that names Db2 tables has a use for
+    it, and one that does not (JCL) should not grow flags it cannot honour."""
+    p.add_argument("--synonym-map", metavar="FILE",
+                   help="JSON file mapping Db2 SYNONYM/ALIAS table names to their base "
+                        "tables ({\"RTAC_ACCOUNT\": \"T_RTAC_ACCOUNT\", ...}) - "
+                        "catalog knowledge supplied as input, never guessed. The "
+                        "operator's explicit answer: when --synonym-resolver is also "
+                        "given, a name the map holds is never asked of the resolver.")
+    p.add_argument("--synonym-resolver", metavar="MODULE:FUNC",
+                   help="a catalog lookup for Db2 SYNONYM/ALIAS names, asked at the "
+                        "point of need instead of handed over as a file: FUNC(name) "
+                        "returns the base table's name, or None when the name is not a "
+                        "synonym. It answers whatever --synonym-map does not hold. A "
+                        "resolver that RAISES is a failed lookup - flagged, the site "
+                        "left unresolved - and is never read as 'not a synonym'. No "
+                        "default: run by hand, --synonym-map is the only door.")
+
+
+def synonym_lookup(args) -> Tuple[Optional[SynonymLookup], Optional[str]]:
+    """The synonym doors this run opened, from :func:`add_synonym_args`'s flags.
+
+    Returns ``(lookup, None)`` - ``lookup`` is ``None`` when neither flag was given - or
+    ``(None, why)`` when a flag named something that cannot be used: a map file that is
+    missing or malformed, a resolver spec that does not load. Both are operator errors
+    the caller reports and exits 2 on - an explicitly named input that will not open is
+    not an absent estate. A resolver whose SIGNATURE looks wrong is only warned about,
+    like a fetcher: the guess is advisory, the call is the proof."""
+    mapping = None
+    if getattr(args, "synonym_map", None):
+        mapping, why = read_synonym_map(args.synonym_map)
+        if why:
+            return None, f"--synonym-map: {why}"
+    resolver = None
+    if getattr(args, "synonym_resolver", None):
+        resolver, why = load_callable(args.synonym_resolver)
+        if why:
+            return None, f"--synonym-resolver {args.synonym_resolver}: {why}"
+        advice = describe_synonym_resolver(resolver)
+        if advice:
+            logger.warning("WARNING: --synonym-resolver %s %s",
+                           args.synonym_resolver, advice)
+    if mapping is None and resolver is None:
+        return None, None
+    return SynonymLookup(mapping, resolver), None
 
 
 def add_output_args(p: argparse.ArgumentParser, *, outdir_help: str) -> None:

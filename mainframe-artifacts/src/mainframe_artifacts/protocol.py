@@ -69,17 +69,39 @@ class ArtifactFetcher(Protocol):
         ...
 
 
-def describe_fetcher(fn: Any) -> Optional[str]:
-    """Explain why ``fn`` cannot work as an :class:`ArtifactFetcher`, or ``None`` if it
-    looks usable.
+@runtime_checkable
+class SynonymResolver(Protocol):
+    """A Db2 SYNONYM/ALIAS lookup against the catalog, as this tool calls it.
 
-    Signature-inspected and advisory ONLY. It is written to stderr as a diagnostic and
-    never into an output file, because a guess about a client's shape is not a finding
-    about the estate. When inspection is not possible (a C callable, a wrapped builtin)
-    this returns ``None`` rather than complaining: unknown is not the same as wrong.
+    The host supplies it, the same way it supplies the artifact service: the catalog is
+    the only place the synonym->base-table join exists, and this tool never derives it.
+    Called with one positional argument, the table name as the statement wrote it,
+    uppercased (``OWNER.T`` stays qualified). Returns the base table's name - which may
+    itself be schema-qualified - or ``None``.
+
+    **The same invariant as** :class:`ArtifactFetcher`, **and it matters just as much:**
+
+        RAISING means THE LOOKUP FAILED - fixable: catalog down, bad connection.
+
+        Returning ``None`` means THE CATALOG WAS ASKED AND THE NAME IS NOT A SYNONYM.
+
+    A consumer keeps them apart: a failed lookup is flagged and the site stays
+    unresolved for a fixable reason; ``None`` reads exactly as an absent map entry. A
+    resolver that returns ``None`` on a connection error would make every synonym in
+    the run read as a plain table - silently, and with a report that says so with
+    full confidence.
     """
+
+    def __call__(self, name: str) -> Optional[str]:
+        ...
+
+
+def _describe(fn: Any, *, absent: str, called_as: str, subject: str,
+              convention: str) -> Optional[str]:
+    """The signature inspection :func:`describe_fetcher` and
+    :func:`describe_synonym_resolver` share; the words differ per contract."""
     if fn is None:
-        return "no estate client was supplied"
+        return absent
     if not callable(fn):
         return f"{fn!r} is not callable"
     try:
@@ -95,11 +117,35 @@ def describe_fetcher(fn: Any) -> Optional[str]:
                   if p.kind in (inspect.Parameter.POSITIONAL_ONLY,
                                 inspect.Parameter.POSITIONAL_OR_KEYWORD)]
     if not positional:
-        return ("takes no positional argument, so it cannot be called as "
-                "fetcher(name) - the member name is always passed positionally")
+        return (f"takes no positional argument, so it cannot be called as "
+                f"{called_as} - {subject} is always passed positionally")
     required = [p for p in positional[1:] if p.default is inspect.Parameter.empty]
     if required:
         names = ", ".join(p.name for p in required)
-        return (f"requires argument(s) {names} that this tool does not supply - a client "
-                f"is called as fetcher(name), optionally with type= and copy=")
+        return (f"requires argument(s) {names} that this tool does not supply - "
+                f"{convention}")
     return None
+
+
+def describe_fetcher(fn: Any) -> Optional[str]:
+    """Explain why ``fn`` cannot work as an :class:`ArtifactFetcher`, or ``None`` if it
+    looks usable.
+
+    Signature-inspected and advisory ONLY. It is written to stderr as a diagnostic and
+    never into an output file, because a guess about a client's shape is not a finding
+    about the estate. When inspection is not possible (a C callable, a wrapped builtin)
+    this returns ``None`` rather than complaining: unknown is not the same as wrong.
+    """
+    return _describe(fn, absent="no estate client was supplied",
+                     called_as="fetcher(name)", subject="the member name",
+                     convention="a client is called as fetcher(name), optionally with "
+                                "type= and copy=")
+
+
+def describe_synonym_resolver(fn: Any) -> Optional[str]:
+    """Explain why ``fn`` cannot work as a :class:`SynonymResolver`, or ``None`` if it
+    looks usable. Advisory only, exactly like :func:`describe_fetcher`."""
+    return _describe(fn, absent="no synonym resolver was supplied",
+                     called_as="resolver(name)", subject="the table name",
+                     convention="a resolver is called as resolver(name) and nothing "
+                                "else")

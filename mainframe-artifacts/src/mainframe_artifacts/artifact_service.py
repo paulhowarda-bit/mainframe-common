@@ -120,6 +120,40 @@ class ServiceUnavailable(CobolXstateError):
     fact from a member being absent, and must never be reported as one."""
 
 
+def _split_spec(spec: str) -> Tuple[str, str]:
+    """``MODULE:FUNC`` (or ``MODULE.FUNC``) -> ``(module, attribute)``; either half empty
+    when the spec is not of that shape."""
+    mod_name, sep, func_name = spec.partition(":")
+    if not sep:
+        mod_name, _, func_name = spec.rpartition(".")
+    return mod_name, func_name
+
+
+def load_callable(spec: str) -> Tuple[Optional[Callable], Optional[str]]:
+    """Import the callable a ``MODULE:FUNC`` (or ``MODULE.FUNC``) spec names.
+
+    Returns ``(callable, None)`` or ``(None, why_not)``. This is the general loader for
+    anything the host injects by name - a synonym resolver, for one; the estate client
+    has its own (:func:`load_fetcher`) because it has a default and a report row to land
+    in when that default is missing, and its messages say so."""
+    import importlib
+
+    mod_name, func_name = _split_spec(spec)
+    if not mod_name or not func_name:
+        return None, f"{spec!r} is not MODULE:FUNC"
+    try:
+        mod = importlib.import_module(mod_name)
+    except Exception as exc:
+        logger.debug("could not import module %r", mod_name, exc_info=True)
+        return None, f"could not import {mod_name} ({type(exc).__name__}: {exc})"
+    fn = getattr(mod, func_name, None)
+    if fn is None:
+        return None, f"{mod_name} has no attribute {func_name}"
+    if not callable(fn):
+        return None, f"{spec} is not callable"
+    return fn, None
+
+
 def load_fetcher(spec: Optional[str] = None) -> Tuple[Optional[Callable], Optional[str]]:
     """Import the estate client. ``spec`` is ``MODULE:FUNC`` (or ``MODULE.FUNC``);
     ``None`` means the default mf-fetch client.
@@ -131,9 +165,7 @@ def load_fetcher(spec: Optional[str] = None) -> Tuple[Optional[Callable], Option
     import importlib
 
     target = spec or DEFAULT_FETCHER
-    mod_name, sep, func_name = target.partition(":")
-    if not sep:
-        mod_name, _, func_name = target.rpartition(".")
+    mod_name, func_name = _split_spec(target)
     if not mod_name or not func_name:
         return None, (f"{target!r} is not MODULE:FUNC "
                       f"(e.g. {DEFAULT_FETCHER})")
