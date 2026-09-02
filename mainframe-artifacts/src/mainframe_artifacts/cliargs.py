@@ -72,8 +72,10 @@ def add_retrieval_args(p: argparse.ArgumentParser) -> None:
 
 def add_synonym_args(p: argparse.ArgumentParser) -> None:
     """The two doors Db2 SYNONYM/ALIAS knowledge arrives by. Its own group, not part of
-    :func:`add_retrieval_args`: only a front-end that names Db2 tables has a use for
-    it, and one that does not (JCL) should not grow flags it cannot honour."""
+    :func:`add_retrieval_args`, so a front-end opts in: every one that names a Db2
+    table does (COBOL, Easytrieve, and JCL - whose LOAD / UNLOAD / SQL control cards
+    name tables under aliases too), and one that never names a table need not grow
+    flags it cannot honour."""
     p.add_argument("--synonym-map", metavar="FILE",
                    help="JSON file mapping Db2 SYNONYM/ALIAS table names to their base "
                         "tables ({\"DRAC_ACCOUNT\": \"T_DRAC_ACCOUNT\", ...}) - "
