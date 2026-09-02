@@ -370,11 +370,11 @@ def _varchar_pair_at(items: List[DataItem], start: int) -> bool:
 
     Only ONE child need sit at 49: three declarations in two Db2 stored procedures pair
     a level-49 length item with a level-05 or level-10 character item and are real
-    VARCHAR parameters (FBSPMG04.CBL:133-135, FBSPMG08.CBL:296-298, both `01` groups).
+    VARCHAR parameters (SAMPG004.CBL:133-135, SAMPG008.CBL:296-298, both `01` groups).
 
     **Deliberately not gated on the PICTURE.** A `S9(4) COMP` + `X(n)` test would miss
-    real VARCHARs whose length item carries no USAGE at all (IXPI0009.CBL:39
-    `49 SUSR-LENGTH PIC S9(4).`, FTNR119.CBL:744 `49 WS-SEC-DS-LEN PIC 9(4) VALUE
+    real VARCHARs whose length item carries no USAGE at all (SAMPI009.CBL:39
+    `49 SUSR-LENGTH PIC S9(4).`, SAMPR119.CBL:744 `49 WS-SEC-DS-LEN PIC 9(4) VALUE
     ZEROES.`). Any picture test is a separate opt-in signal, and would have to accept
     DISPLAY as well as COMP/COMP-4/COMP-5/BINARY.
 
@@ -414,7 +414,7 @@ def elementary_subordinates(items: List[DataItem], name: str) -> Optional[List[s
     emitted as the GROUP's own name because that is the one host variable the
     precompiler sends for it (see ``_varchar_pair_at``).
 
-    `EXEC SQL FETCH c INTO :BSTI-TRNF-INIT` names a 01-level group, and the DB2
+    `EXEC SQL FETCH c INTO :DSTI-TRNF-INIT` names a 01-level group, and the DB2
     precompiler rewrites it into every elementary item under that group before the
     statement ever reaches the database. A recovery that keeps the source spelling sees
     ONE host variable where the cursor has fifty columns, so the count gate refuses the

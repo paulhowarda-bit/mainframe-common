@@ -29,17 +29,17 @@ class Recorder:
 # --------------------------------------------------------------------------- #
 
 def test_the_map_answers_first_and_a_map_hit_never_reaches_the_resolver():
-    r = Recorder({"RTAC_ACCOUNT": "T_OTHER"})
-    look = SynonymLookup({"rtac_account": "t_rtac_account"}, r)
-    assert look("RTAC_ACCOUNT") == ("T_RTAC_ACCOUNT", FROM_MAP)
-    assert look("rtac_account") == ("T_RTAC_ACCOUNT", FROM_MAP)
+    r = Recorder({"DRAC_ACCOUNT": "T_OTHER"})
+    look = SynonymLookup({"drac_account": "t_drac_account"}, r)
+    assert look("DRAC_ACCOUNT") == ("T_DRAC_ACCOUNT", FROM_MAP)
+    assert look("drac_account") == ("T_DRAC_ACCOUNT", FROM_MAP)
     assert r.calls == []
 
 
 def test_the_resolver_answers_what_the_map_does_not_hold():
-    r = Recorder({"V_SMIX_ACTIVE": "MMD1DBO.T_SMIX_ACTIVE"})
-    look = SynonymLookup({"RTAC_ACCOUNT": "T_RTAC_ACCOUNT"}, r)
-    assert look("V_SMIX_ACTIVE") == ("MMD1DBO.T_SMIX_ACTIVE", FROM_RESOLVER)
+    r = Recorder({"V_SMIX_ACTIVE": "DMD1DBO.T_EXIX_ACTIVE"})
+    look = SynonymLookup({"DRAC_ACCOUNT": "T_DRAC_ACCOUNT"}, r)
+    assert look("V_SMIX_ACTIVE") == ("DMD1DBO.T_EXIX_ACTIVE", FROM_RESOLVER)
     assert r.calls == ["V_SMIX_ACTIVE"]
 
 
@@ -55,12 +55,12 @@ def test_none_from_the_resolver_is_not_a_synonym_and_is_remembered():
 
 def test_a_raising_resolver_is_a_failed_lookup_that_disables_only_the_resolver():
     r = Recorder(raises=RuntimeError("catalog down"))
-    look = SynonymLookup({"RTAC_ACCOUNT": "T_RTAC_ACCOUNT"}, r)
+    look = SynonymLookup({"DRAC_ACCOUNT": "T_DRAC_ACCOUNT"}, r)
     assert look("V_X") is None
     assert look.disabled_reason == "resolver raised RuntimeError: catalog down"
     assert look("V_Y") is None              # never asked again this run
     assert r.calls == ["V_X"]
-    assert look("RTAC_ACCOUNT") == ("T_RTAC_ACCOUNT", FROM_MAP)   # the map still answers
+    assert look("DRAC_ACCOUNT") == ("T_DRAC_ACCOUNT", FROM_MAP)   # the map still answers
 
 
 def test_a_resolver_returning_something_other_than_a_name_is_a_failed_lookup():
@@ -79,7 +79,7 @@ def test_a_returned_base_is_uppercased_and_keeps_its_qualifier():
 
 
 def test_an_empty_name_and_no_doors_are_both_no_answer():
-    assert SynonymLookup()("RTAC_ACCOUNT") is None
+    assert SynonymLookup()("DRAC_ACCOUNT") is None
     assert SynonymLookup({"A": "B"}, Recorder())("") is None
 
 
@@ -89,8 +89,8 @@ def test_an_empty_name_and_no_doors_are_both_no_answer():
 
 def test_a_well_formed_map_reads(tmp_path):
     p = tmp_path / "syn.json"
-    p.write_text(json.dumps({"RTAC_ACCOUNT": "T_RTAC_ACCOUNT"}), encoding="utf-8")
-    assert read_synonym_map(p) == ({"RTAC_ACCOUNT": "T_RTAC_ACCOUNT"}, None)
+    p.write_text(json.dumps({"DRAC_ACCOUNT": "T_DRAC_ACCOUNT"}), encoding="utf-8")
+    assert read_synonym_map(p) == ({"DRAC_ACCOUNT": "T_DRAC_ACCOUNT"}, None)
 
 
 def test_the_three_map_rejections_say_why(tmp_path):
@@ -124,9 +124,9 @@ def test_neither_flag_opens_no_door():
 
 def test_the_map_flag_reads_the_file_and_a_bad_file_is_an_error(tmp_path):
     p = tmp_path / "syn.json"
-    p.write_text(json.dumps({"RTAC_ACCOUNT": "T_RTAC_ACCOUNT"}), encoding="utf-8")
+    p.write_text(json.dumps({"DRAC_ACCOUNT": "T_DRAC_ACCOUNT"}), encoding="utf-8")
     look, why = synonym_lookup(_args("--synonym-map", str(p)))
-    assert why is None and look("RTAC_ACCOUNT") == ("T_RTAC_ACCOUNT", FROM_MAP)
+    assert why is None and look("DRAC_ACCOUNT") == ("T_DRAC_ACCOUNT", FROM_MAP)
     look, why = synonym_lookup(_args("--synonym-map", str(tmp_path / "nope.json")))
     assert look is None and why.startswith("--synonym-map: no such file")
 

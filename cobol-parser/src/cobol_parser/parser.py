@@ -1918,7 +1918,7 @@ class StmtParser:
         variable that fills it, or None for a literal/expression slot.
 
         A group-level slot fills as many columns as the group has elementary items -
-        `VALUES (:BSTI-TRNF-INIT, :WS-MULTI-CO-N)` is two slots in the source and 51 to
+        `VALUES (:DSTI-TRNF-INIT, :WS-MULTI-CO-N)` is two slots in the source and 51 to
         Db2 - so the expansion has to happen BEFORE the arity is weighed against the
         column list, or the comparison is between two counts that were never meant to
         agree.

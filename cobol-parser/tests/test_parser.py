@@ -470,7 +470,7 @@ def test_perform_procedure_then_times_still_parses_both():
 
 _NESTED_WITH_HYPHENATED_ITEM = (
     "       IDENTIFICATION DIVISION.\n"
-    "       PROGRAM-ID. FBMMAAIO.\n"
+    "       PROGRAM-ID. SAMPMAIN.\n"
     "       DATA DIVISION.\n"
     "       WORKING-STORAGE SECTION.\n"
     "       01  PNET-MQ-AREA.\n"
@@ -485,13 +485,13 @@ _NESTED_WITH_HYPHENATED_ITEM = (
     "       0000-USECICS.\n"
     "           GOBACK.\n"
     "       END PROGRAM USECICS.\n"
-    "       END PROGRAM FBMMAAIO.\n"
+    "       END PROGRAM SAMPMAIN.\n"
 )
 
 
 def test_hyphenated_data_name_does_not_hide_a_nested_program():
     prog = parse_program(_NESTED_WITH_HYPHENATED_ITEM)
-    assert prog.program_id == "FBMMAAIO"
+    assert prog.program_id == "SAMPMAIN"
     assert prog.nested_programs == ["USECICS"], (
         "a data item ending in -PROGRAM-ID was counted as a program, breaking the "
         "contained-program walk")
@@ -619,12 +619,12 @@ def test_declare_cursor_across_fixed_format_lines_with_underscored_name():
         "       0000-MAIN.\n"
         "           EXEC SQL DECLARE WC_TRDS_AND_CNFMS_ACCT_ASC\n"
         "                INSENSITIVE SCROLL CURSOR FOR\n"
-        "                SELECT A, B FROM T_IDPN_PENDCA\n"
+        "                SELECT A, B FROM T_DDPN_PENDCA\n"
         "           END-EXEC\n"
         "           STOP RUN.\n"
     ))
     assert [d["cursor"] for d in prog.sql_cursors] == ["WC_TRDS_AND_CNFMS_ACCT_ASC"]
-    assert prog.sql_cursors[0]["table"] == "T_IDPN_PENDCA"
+    assert prog.sql_cursors[0]["table"] == "T_DDPN_PENDCA"
 
 
 def test_non_cursor_declares_still_name_no_cursor():

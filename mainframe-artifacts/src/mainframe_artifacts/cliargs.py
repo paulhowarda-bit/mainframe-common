@@ -76,7 +76,7 @@ def add_synonym_args(p: argparse.ArgumentParser) -> None:
     it, and one that does not (JCL) should not grow flags it cannot honour."""
     p.add_argument("--synonym-map", metavar="FILE",
                    help="JSON file mapping Db2 SYNONYM/ALIAS table names to their base "
-                        "tables ({\"RTAC_ACCOUNT\": \"T_RTAC_ACCOUNT\", ...}) - "
+                        "tables ({\"DRAC_ACCOUNT\": \"T_DRAC_ACCOUNT\", ...}) - "
                         "catalog knowledge supplied as input, never guessed. The "
                         "operator's explicit answer: when --synonym-resolver is also "
                         "given, a name the map holds is never asked of the resolver.")

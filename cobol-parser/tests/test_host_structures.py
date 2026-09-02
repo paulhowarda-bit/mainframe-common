@@ -257,8 +257,8 @@ def test_a_varchar_pair_is_one_host_variable():
 
 
 def test_a_varchar_length_item_needs_no_usage_clause():
-    # Estate members write `49 X-LENGTH PIC S9(4).` with no COMP (IXPI0009.CBL:39,
-    # FTNR119.CBL:744). The gate is the LEVEL NUMBER; a `S9(4) COMP` picture test
+    # Estate members write `49 X-LENGTH PIC S9(4).` with no COMP (SAMPI009.CBL:39,
+    # SAMPR119.CBL:744). The gate is the LEVEL NUMBER; a `S9(4) COMP` picture test
     # would miss them.
     assert elementary_subordinates(_items(VARCHAR), "SPIB-BUF") is None
 
@@ -270,7 +270,7 @@ def test_sqlca_own_varchar_reads_the_same_way():
 
 
 def test_only_one_child_has_to_be_at_49():
-    # FBSPMG04:133-135 and FBSPMG08:296-298 are real VARCHAR parameters declared
+    # SAMPG004:133-135 and SAMPG008:296-298 are real VARCHAR parameters declared
     # 49 + 10 and 49 + 05.
     assert elementary_subordinates(_items(VARCHAR), "IN-PARM-5") is None
 
@@ -322,7 +322,7 @@ def test_a_varchar_whose_data_item_outranks_its_group_is_a_known_gap():
 
 def test_a_linkage_varchar_parameter_reads_the_same_way():
     # A stored-procedure VARCHAR parameter that is never used as a host variable
-    # (modelled on PCBEN171.CBL:88-90). Nothing about it should differ from a
+    # (modelled on DEMOPRC1.CBL:88-90). Nothing about it should differ from a
     # WORKING-STORAGE one: the rule is the declaration shape, not the section.
     assert elementary_subordinates(_items(VARCHAR), "LK-PARM-V") is None
 
@@ -387,7 +387,7 @@ def test_an_update_set_slot_names_a_host_variable_the_statement_also_lists():
     """The SET pair named the GROUP while the statement-wide host-variable scan listed
     its two children - a column mapped to a host variable absent from the statement's
     own field list, with NO note anywhere. Downstream that loses the edge exactly as
-    the loud refusal does, by a different mechanism. FBSPMF99:997 is the estate
+    the loud refusal does, by a different mechanism. SAMPF099:997 is the estate
     instance.
 
     Note this closes the INCONSISTENCY, not the silent-drop class: a SET slot whose

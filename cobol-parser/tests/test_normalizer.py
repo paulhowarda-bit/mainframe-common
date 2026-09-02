@@ -141,13 +141,13 @@ def test_fixed_long_lines_and_ident_area_not_misread_as_free():
 
 
 def test_detect_fixed_with_alphanumeric_change_markers_in_sequence_area():
-    # THE change-marker case (e.g. FBMMAAIO): real fixed source carries alphanumeric
+    # THE change-marker case (e.g. SAMPMAIN): real fixed source carries alphanumeric
     # change/revision markers in the sequence area (cols 1-6). The compiler ignores
     # cols 1-6, so these must NOT be read as free-format code. Column 7 stays a valid
     # indicator on every line, so the column-7 invariant classifies it fixed.
     src = (
         "CHG001 IDENTIFICATION DIVISION.\n"
-        "CHG001 PROGRAM-ID. FBMMAAIO.\n"
+        "CHG001 PROGRAM-ID. SAMPMAIN.\n"
         "PR1234 PROCEDURE DIVISION.\n"
         "PR1234 5000-PROCESS.\n"
         "MOD07A     MOVE WS-A TO WS-B.\n"
@@ -158,7 +158,7 @@ def test_detect_fixed_with_alphanumeric_change_markers_in_sequence_area():
     # And the change markers are stripped, leaving clean code.
     texts = [cl.text.strip() for cl in normalize(src)]
     assert "IDENTIFICATION DIVISION." in texts
-    assert "PROGRAM-ID. FBMMAAIO." in texts
+    assert "PROGRAM-ID. SAMPMAIN." in texts
     assert not any("CHG001" in t or "PR1234" in t for t in texts)
 
 
