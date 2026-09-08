@@ -508,6 +508,197 @@ def test_find_program_id_ignores_a_hyphenated_data_name():
     assert _find_program_id(lines) == ("REALPGM", 2)
 
 
+# --------------------------------------------------------------------------- #
+# a quoted program name, and a name on the line after `PROGRAM-ID.`
+#
+# The PROGRAM-ID regex required the name to follow the optional period immediately and on
+# the SAME line - it is applied per CodeLine, so its `\s*` never crosses one. So
+# `PROGRAM-ID. 'MYPGM'.` stopped at the apostrophe, and `PROGRAM-ID.` with the name on
+# the next card could not match at all. Both are valid COBOL and both occur in the estate
+# (roughly 4 quoted to 1 next-line). The file otherwise parsed perfectly - paragraphs,
+# working storage, COPY references and CALLs were all extracted - so only the program's
+# own name was lost, and it came back as the same `RECOVERED` sentinel a file that names
+# no program gets. Downstream the two are indistinguishable: the program acquires no
+# identity and every CALL to it reads as a module missing from the estate.
+# --------------------------------------------------------------------------- #
+
+def test_a_program_name_on_the_line_after_program_id_is_read():
+    """`PROGRAM-ID.` alone on its card with the name on the next one.
+    The reported line is the NAME's, not the `PROGRAM-ID` token's."""
+    from cobol_parser.parser import _find_program_id
+    from cobol_parser.normalizer import normalize
+    lines = normalize(
+        "       IDENTIFICATION DIVISION.\n"
+        "       PROGRAM-ID.\n"
+        "       MYPGM.\n")
+    assert _find_program_id(lines) == ("MYPGM", 3)
+
+
+def test_a_program_name_is_read_across_a_blank_line():
+    from cobol_parser.parser import _find_program_id
+    from cobol_parser.normalizer import normalize
+    lines = normalize(
+        "       IDENTIFICATION DIVISION.\n"
+        "       PROGRAM-ID.\n"
+        "\n"
+        "       MYPGM.\n")
+    assert _find_program_id(lines) == ("MYPGM", 4)
+
+
+def test_a_quoted_program_name_is_read():
+    """`PROGRAM-ID. 'MYPGM'.` - a program-name literal, in either quote character."""
+    from cobol_parser.parser import _find_program_id
+    from cobol_parser.normalizer import normalize
+    single = normalize(
+        "       IDENTIFICATION DIVISION.\n"
+        "       PROGRAM-ID. 'MYPGM'.\n")
+    double = normalize(
+        "       IDENTIFICATION DIVISION.\n"
+        '       PROGRAM-ID. "MYPGM".\n')
+    assert _find_program_id(single) == ("MYPGM", 2)
+    assert _find_program_id(double) == ("MYPGM", 2)
+
+
+def test_a_quoted_program_name_is_read_on_the_continuation_line():
+    """The two shapes combined: a bare `PROGRAM-ID.` whose next card carries a literal."""
+    from cobol_parser.parser import _find_program_id
+    from cobol_parser.normalizer import normalize
+    lines = normalize(
+        "       IDENTIFICATION DIVISION.\n"
+        "       PROGRAM-ID.\n"
+        "       'MYPGM'.\n")
+    assert _find_program_id(lines) == ("MYPGM", 3)
+
+
+def test_a_hyphenated_data_name_still_yields_the_sentinel():
+    """The widened patterns must not undo the `(?<!-)` guard: a copybook declaring an item
+    ending in -PROGRAM-ID names no program."""
+    from cobol_parser.parser import _find_program_id
+    from cobol_parser.normalizer import normalize
+    lines = normalize(
+        "       01  PNET-MQ-AREA.\n"
+        "           05  PNET-MQ-PROGRAM-ID   PIC X(8).\n")
+    assert _find_program_id(lines) == ("RECOVERED", 0)
+
+
+def test_a_program_id_in_a_comment_banner_still_yields_the_sentinel():
+    """A copybook whose only PROGRAM-ID token is prose in a banner. The normalizer drops
+    column-7 comment cards before the scan ever sees them, so no pattern can reach it."""
+    from cobol_parser.parser import _find_program_id
+    from cobol_parser.normalizer import normalize
+    lines = normalize(
+        "      *    PROGRAM-ID. BANNERPG.\n"
+        "       01  WS-FLAG   PIC X.\n")
+    assert _find_program_id(lines) == ("RECOVERED", 0)
+
+
+def test_a_bare_program_id_does_not_absorb_the_following_statement():
+    """The forward scan gives up rather than taking whatever follows, so a malformed
+    IDENTIFICATION DIVISION returns the sentinel and not `PROCEDURE`."""
+    from cobol_parser.parser import _find_program_id
+    from cobol_parser.normalizer import normalize
+    lines = normalize(
+        "       IDENTIFICATION DIVISION.\n"
+        "       PROGRAM-ID.\n"
+        "       PROCEDURE DIVISION.\n")
+    assert _find_program_id(lines) == ("RECOVERED", 0)
+
+
+def test_a_bare_program_id_does_not_absorb_an_id_division_paragraph():
+    """The single-token case the two-word `PROCEDURE DIVISION.` test cannot reach. Every
+    optional IDENTIFICATION DIVISION paragraph header is one word plus a period - the exact
+    shape of a bare program name, and the card that really follows PROGRAM-ID - so each must
+    leave the name unrecovered rather than become it."""
+    from cobol_parser.parser import _find_program_id
+    from cobol_parser.normalizer import normalize
+    for para in ("AUTHOR", "INSTALLATION", "DATE-WRITTEN", "DATE-COMPILED",
+                 "SECURITY", "REMARKS"):
+        lines = normalize(
+            "       IDENTIFICATION DIVISION.\n"
+            "       PROGRAM-ID.\n"
+            "       " + para + ".\n"
+            "           J SMITH.\n")
+        assert _find_program_id(lines) == ("RECOVERED", 0), para
+
+
+def test_a_program_named_like_an_id_division_paragraph_is_still_read_on_its_own_line():
+    """The guard is on the forward scan only. A program legitimately named AUTHOR on the
+    same card as PROGRAM-ID is a name, not a paragraph header, and still reads."""
+    from cobol_parser.parser import _find_program_id
+    from cobol_parser.normalizer import normalize
+    lines = normalize(
+        "       IDENTIFICATION DIVISION.\n"
+        "       PROGRAM-ID. AUTHOR.\n")
+    assert _find_program_id(lines) == ("AUTHOR", 2)
+
+
+def test_a_bare_program_id_on_the_last_line_yields_the_sentinel():
+    """There is no next card to scan; the forward scan must fall through, not raise."""
+    from cobol_parser.parser import _find_program_id
+    from cobol_parser.normalizer import normalize
+    lines = normalize(
+        "       IDENTIFICATION DIVISION.\n"
+        "       PROGRAM-ID.\n")
+    assert _find_program_id(lines) == ("RECOVERED", 0)
+
+
+def test_the_ordinary_same_line_program_id_is_unchanged():
+    """GUARD (passes before and after)."""
+    from cobol_parser.parser import _find_program_id
+    from cobol_parser.normalizer import normalize
+    lines = normalize(
+        "       IDENTIFICATION DIVISION.\n"
+        "       PROGRAM-ID. GOODPGM.\n")
+    assert _find_program_id(lines) == ("GOODPGM", 2)
+    assert parse_program(_wrap("       0000-MAIN.\n"
+                               "           GOBACK.\n")).program_id == "T"
+
+
+_NESTED_WITH_QUOTED_NAMES = (
+    "       IDENTIFICATION DIVISION.\n"
+    "       PROGRAM-ID. 'OUTERPGM'.\n"
+    "       PROCEDURE DIVISION.\n"
+    "       0000-MAIN.\n"
+    "           CALL 'INNERPGM'\n"
+    "           GOBACK.\n"
+    "       IDENTIFICATION DIVISION.\n"
+    "       PROGRAM-ID. 'INNERPGM'.\n"
+    "       PROCEDURE DIVISION.\n"
+    "       0000-INNER.\n"
+    "           GOBACK.\n"
+    "       END PROGRAM INNERPGM.\n"
+    "       END PROGRAM OUTERPGM.\n"
+)
+
+
+def test_a_quoted_contained_program_is_split_out():
+    """_split_program_units shares the widened pattern, so quoted names now count towards
+    its nesting depth too: before the fix this file counted ZERO PROGRAM-IDs, took the
+    single-program no-op path, and folded the inner program's paragraphs into the outer
+    one while reporting no contained programs at all."""
+    prog = parse_program(_NESTED_WITH_QUOTED_NAMES)
+    assert prog.program_id == "OUTERPGM"
+    assert prog.nested_programs == ["INNERPGM"]
+    assert [p.name for p in prog.paragraphs] == ["0000-MAIN"], (
+        "the contained program's body folded into the outer program")
+
+
+def test_a_data_item_named_program_id_does_not_mask_the_real_name():
+    """`01  PROGRAM-ID.` as a group item carries no name on its own card, so it matches the
+    bare pattern - and the bare branch returns unconditionally. The real PROGRAM-ID earlier
+    in the file is still what comes back, because the scan reaches it first."""
+    from cobol_parser.parser import _find_program_id
+    from cobol_parser.normalizer import normalize
+    lines = normalize(
+        "       IDENTIFICATION DIVISION.\n"
+        "       PROGRAM-ID. REALPGM.\n"
+        "       DATA DIVISION.\n"
+        "       WORKING-STORAGE SECTION.\n"
+        "       01  PROGRAM-ID.\n"
+        "           05  WS-NAME   PIC X(8).\n")
+    assert _find_program_id(lines) == ("REALPGM", 2)
+
+
 # -- a literal is data, not clause boundaries (audit finding #12) -----------
 
 def test_select_clause_survives_a_dataset_literal_containing_select():

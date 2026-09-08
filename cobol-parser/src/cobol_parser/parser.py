@@ -98,17 +98,42 @@ _RESERVED_HEADER = STARTERS | {
 
 def _find_program_id(lines: List[CodeLine]) -> Tuple[str, int]:
     """Return (program-id, source line it was matched on); (\"RECOVERED\", 0) if absent."""
-    for cl in lines:
+    for i, cl in enumerate(lines):
         m = _PROGRAM_ID_RE.search(cl.text)
         if m:
             return m.group(1).upper(), cl.line
+        # `PROGRAM-ID.` alone on its line: the name is on the next non-blank one. Scanning
+        # forward rather than joining the source keeps every other line's own line number.
+        if _PROGRAM_ID_BARE.search(cl.text):
+            for nxt in lines[i + 1:]:
+                if not nxt.text.strip():
+                    continue
+                n = _PROGRAM_NAME_ONLY.match(nxt.text)
+                if n and n.group(1).upper() not in _ID_PARAGRAPHS:
+                    return n.group(1).upper(), nxt.line
+                return "RECOVERED", 0
     return "RECOVERED", 0
 
 
 # `(?<!-)`: `\b` alone fires after a hyphen, so `\bPROGRAM-ID\b` matched the tail of a data
 # name like `PNET-MQ-PROGRAM-ID` and counted a phantom program. Excluding a preceding hyphen
 # drops those false hits and still rejects `XPROGRAM-ID`, exactly as the bare `\b` did.
-_PROGRAM_ID_RE = re.compile(r"(?<!-)\bPROGRAM-ID\b\s*\.?\s*([A-Z0-9][A-Z0-9-]*)", re.I)
+# The name may be a quoted literal: `PROGRAM-ID. 'NAME'.` is valid COBOL. The quote is
+# optional and not required to balance, because a truncated card should still yield the name.
+_PROGRAM_ID_RE = re.compile(
+    r"(?<!-)\bPROGRAM-ID\b\s*\.?\s*['\"]?([A-Z0-9][A-Z0-9-]*)", re.I)
+
+# `PROGRAM-ID` with no name after it on the same line - the name is on a later line.
+_PROGRAM_ID_BARE = re.compile(r"(?<!-)\bPROGRAM-ID\b\s*\.?\s*$", re.I)
+# A bare program name on a continuation line, with COBOL's optional terminating period.
+_PROGRAM_NAME_ONLY = re.compile(r"^\s*['\"]?([A-Z0-9][A-Z0-9-]*)['\"]?\s*\.?\s*$", re.I)
+# The other IDENTIFICATION DIVISION paragraph headers. Each is one word plus a period -
+# the shape of a bare program name - and each is exactly what follows PROGRAM-ID on a real
+# card image, so a PROGRAM-ID with no name at all must not absorb one and report a program
+# called AUTHOR. The name stays unrecovered instead, which is what the sentinel is for.
+_ID_PARAGRAPHS = frozenset({
+    "AUTHOR", "INSTALLATION", "DATE-WRITTEN", "DATE-COMPILED", "SECURITY", "REMARKS",
+})
 _END_PROGRAM_RE = re.compile(r"\bEND\s+PROGRAM\b(?:\s+([A-Z0-9][A-Z0-9-]*))?", re.I)
 
 
@@ -126,6 +151,9 @@ def _split_program_units(lines: List[CodeLine]) -> Tuple[List[CodeLine], List[st
     with a single ``PROGRAM-ID`` (the overwhelmingly common case, and every existing
     fixture) has no contained programs, so the lines are returned unchanged and the name
     list is empty - this pass is then a no-op and output is byte-identical."""
+    # Only the same-line pattern counts here: a contained program whose name sits on the
+    # NEXT line is still folded into the outer one, because the forward scan that recovers
+    # it belongs to _find_program_id (which needs one name, not a nesting depth).
     n_ids = sum(1 for cl in lines if _PROGRAM_ID_RE.search(cl.text))
     if n_ids <= 1:
         return lines, []
