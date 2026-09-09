@@ -305,10 +305,12 @@ def fetch_dependencies(manifest: dict, fetcher: Optional[Callable],
     that was never fetchable is reported as ``skipped`` with the reason, not dropped."""
     prefetched = prefetched or {}
     # A COBOL manifest names its subject "program"; a JCL one names it "job" (see
-    # jcl_views.build_jcl_artifacts). Reading only the first labelled every JCL run's
-    # report `"program": "?"` and left the never-fetch-yourself guard holding "?", so a
-    # job was requested from the estate as a dependency of itself.
-    program = manifest.get("program") or manifest.get("job") or "?"
+    # jcl_views.build_jcl_artifacts); a CICS one names it "region" (cics_dependencies.
+    # views), because a CSD source is neither a program nor a job. Reading only the first
+    # labelled every JCL run's report `"program": "?"` and left the never-fetch-yourself
+    # guard holding "?", so a job was requested from the estate as a dependency of itself.
+    program = (manifest.get("program") or manifest.get("job")
+               or manifest.get("region") or "?")
     subject = str(program).upper()
     # name -> the status the FIRST row for it actually reached. Recording the name
     # BEFORE the fetch made every later row for it claim "already-fetched ... was
