@@ -32,13 +32,15 @@ def prefetch_cobol(source: str, fetcher: Optional[Callable],
                    result: Optional[PrefetchResult] = None,
                    exts: Optional[Tuple[str, ...]] = None,
                    jobs: int = 1,
-                   seen: Optional[Iterable[str]] = None) -> PrefetchResult:
+                   seen: Optional[Iterable[str]] = None,
+                   producer: Optional[str] = None) -> PrefetchResult:
     """Close over every ``COPY`` / ``EXEC SQL INCLUDE`` member the program needs.
 
     Transitive: each retrieved member is scanned in turn, because a copybook that COPYs
     another copybook has a hole in it exactly like the program did. Cycles terminate on
     the seen-set, so a mutually-including pair costs one fetch each."""
-    pf = Prefetcher(fetcher, paths, dest, unavailable, result, exts, seen=seen)
+    pf = Prefetcher(fetcher, paths, dest, unavailable, result, exts, seen=seen,
+                    producer=producer)
     pf.name_source(source_name)
 
     # Level by level, not member by member. The worklist GROWS as members are read - a

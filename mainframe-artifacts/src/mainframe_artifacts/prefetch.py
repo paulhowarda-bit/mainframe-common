@@ -43,6 +43,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Callable, Dict, Iterable, List, Optional, Tuple
 
+from .report import DEFAULT_PRODUCER, REPORT_SCHEMA_VERSION
 from .artifact_service import (Fetched, ServiceUnavailable, call_service,
                                call_service_many, collect, decode_member)
 
@@ -77,6 +78,10 @@ class PrefetchResult:
     duplicated into each front-end."""
 
     source_name: str = "<source>"
+    #: The front-end that ran this stage, used to name the report. This module is
+    #: shared by every front-end, so a hardcoded name here would have a JCL run and
+    #: an Easytrieve run both filing reports claiming to be cobol-xstate's.
+    producer: str = DEFAULT_PRODUCER
     store: Dict[str, Tuple[str, str]] = field(default_factory=dict)
     fetched: Dict[str, Fetched] = field(default_factory=dict)
     rows: List[dict] = field(default_factory=list)
@@ -112,7 +117,8 @@ class PrefetchResult:
 
     def report(self) -> dict:
         return {
-            "format": "cobol-xstate-prefetch",
+            "format": f"{self.producer}-prefetch",
+            "formatVersion": REPORT_SCHEMA_VERSION,
             "source": self.source_name,
             "note": (
                 "Stage 1: the members needed to COMPLETE THE SOURCE TEXT before it is "
@@ -144,7 +150,7 @@ class Prefetcher:
                  dest: Optional[str] = None, unavailable: Optional[str] = None,
                  result: Optional[PrefetchResult] = None,
                  exts: Optional[Tuple[str, ...]] = None,
-                 seen: Optional[Iterable[str]] = None):
+                 seen: Optional[Iterable[str]] = None, producer: Optional[str] = None):
         self.fetcher = fetcher
         self.paths = list(paths or [])
         self.dest = dest
@@ -158,6 +164,8 @@ class Prefetcher:
             seen_ext.setdefault(e, None)
         self.exts: Tuple[str, ...] = tuple(seen_ext)
         self.result = result or PrefetchResult()
+        if producer is not None:
+            self.result.producer = producer
         # Only ever RECORD an outage, never clear one. A second stage called with
         # unavailable=None (the COBOL run's --bind-jcl loop does exactly this) was
         # erasing a recorded outage, and report() then said serviceAvailable: true for

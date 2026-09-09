@@ -12,6 +12,18 @@ import logging
 from typing import Optional
 
 
+#: Bumped when either retrieval report's shape changes in a way a consumer must
+#: notice. Additive keys do NOT bump it; a removed or re-meaning key does. Separate
+#: from the front-ends' VIEW_SCHEMA_VERSION: these two reports are a different
+#: contract, produced here rather than by any of them.
+REPORT_SCHEMA_VERSION = 1
+
+#: Used when a caller names no producer. Deliberately not one of the front-ends -
+#: this module is shared, and defaulting to any one of them is the defect being
+#: fixed (upstream ledger batch 10, item 30c).
+DEFAULT_PRODUCER = "mainframe-artifacts"
+
+
 def report_stages(log: logging.Logger, source_name: str, pre, fetched: dict) -> None:
     """One line per retrieval stage on stderr, plus every hole named individually."""
     pc, fc = pre.counts, (fetched or {}).get("counts", {})

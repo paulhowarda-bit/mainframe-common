@@ -87,7 +87,7 @@ def test_a_producer_can_name_its_own_subject():
     manifest = {"subject": "PROCLIB.SAMPPROC", "artifacts": [
         _row("PROCLIB.SAMPPROC", "db2-stored-procedure")]}
     report = fetch_dependencies(manifest, None)
-    assert report["program"] != "?"
+    assert report["subject"] != "?"
     row = report["members"][0] if "members" in report else report["artifacts"][0]
     assert row["status"] == "skipped"
     assert "being analysed" in row["reason"]
@@ -100,4 +100,4 @@ def test_the_legacy_subject_keys_still_work():
 
     for key in ("program", "job", "region"):
         report = fetch_dependencies({key: "SUBJ", "artifacts": []}, None)
-        assert report["program"] == "SUBJ", key
+        assert report["subject"] == "SUBJ", key

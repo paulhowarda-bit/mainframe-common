@@ -54,6 +54,7 @@ from typing import Callable, Dict, List, Optional, Tuple
 
 from .artifact_service import (ServiceUnavailable, call_service_many,
                                canonical_type, collect)
+from .report import DEFAULT_PRODUCER, REPORT_SCHEMA_VERSION
 from .categories import CATEGORY_ASM, CATEGORY_COBOL, NON_FETCHABLE
 
 # A CALL names a load module but NOT its language: the callee may be COBOL, assembler,
@@ -295,7 +296,8 @@ def fetch_dependencies(manifest: dict, fetcher: Optional[Callable],
                        prefetched: Optional[Dict[str, Tuple[str, str]]] = None,
                        unavailable: Optional[str] = None,
                        dynamic: Optional[dict] = None,
-                       jobs: int = 1) -> dict:
+                       jobs: int = 1,
+                       producer: str = DEFAULT_PRODUCER) -> dict:
     """Fetch this program's immediate dependent artifacts.
 
     ``fetcher(name, type=..., copy=...)`` is the estate's artifact service - mf-fetch by
@@ -478,8 +480,9 @@ def fetch_dependencies(manifest: dict, fetcher: Optional[Callable],
         counts[r["status"]] = counts.get(r["status"], 0) + 1
 
     return {
-        "format": "cobol-xstate-fetch",
-        "program": program,
+        "format": f"{producer}-fetch",
+        "formatVersion": REPORT_SCHEMA_VERSION,
+        "subject": program,
         "note": (
             "Stage 2: one row per artifact this program depends on, with the outcome of "
             "retrieving it. These are the program's IMMEDIATE dependencies - a callee's "
