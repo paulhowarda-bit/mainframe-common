@@ -116,6 +116,8 @@ _NEVER_FETCHABLE = {
     "caller": "the caller is whoever invokes this program (a JCL step or a CICS "
               "transaction), not a member that can be retrieved by this name",
     "spool":  "SYSOUT/spool is a runtime destination, not a stored artifact",
+    "db2-tablespace": "a tablespace is a Db2 catalog object (SYSIBM.SYSTABLESPACE), not a "
+                      "member on the share; the tables it holds come from the catalog",
 }
 
 # A member name that could plausibly be requested from a library. Anything with a

@@ -47,6 +47,24 @@ def test_a_db2_table_is_still_planned_as_ddl():
     assert entry["type"] == "ddl"
 
 
+def test_a_db2_tablespace_is_skipped_for_the_catalog_reason_not_the_omission_one():
+    """Two honest reasons a row cannot be fetched, and this is the settled one.
+
+    Upstream ledger batch 10, item 33c. `_NEVER_FETCHABLE` says *this kind is not a
+    retrievable artifact*; the `_KIND_TYPE` fallthrough says *this kind has no request type
+    yet*. A tablespace is the first: a utility works on the space, not on a named source
+    member, and the row's own `resolvedBy` already says the catalog resolves it.
+
+    Asserting on the REASON is the whole point of the test - both outcomes are `skipped`,
+    so a test that only checks the status passes either way.
+    """
+    entry = _plan_for(_row("DBPOSN.TSPOSN", "db2-tablespace",
+                           resolvedBy="the Db2 catalog (SYSIBM.SYSTABLESPACE)"))
+    assert entry["status"] == "skipped"
+    assert "Db2 catalog object" in entry["reason"]
+    assert "has no known retrieval type" not in entry["reason"]
+
+
 def test_an_unknown_kind_is_skipped_and_says_why():
     """The honest fallthrough, and the reason a reader triages on."""
     entry = _plan_for(_row("WHATEVER", "not-a-kind-anyone-emits"))
