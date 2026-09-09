@@ -71,3 +71,33 @@ def test_an_unknown_kind_is_skipped_and_says_why():
     assert entry["status"] == "skipped"
     assert entry["reason"] == ("artifact kind 'not-a-kind-anyone-emits' has no known "
                                "retrieval type")
+
+
+def test_a_producer_can_name_its_own_subject():
+    """`subject` is the general form, so a front-end that is neither a program, a job nor
+    a region does not have to lie about itself to arm the never-fetch-yourself guard.
+
+    Upstream ledger batch 10, item 33b. Before this, a Db2 stored-procedure extractor had
+    to emit a false `program` key holding its procedure name purely so the guard would
+    exclude the procedure's own artifact row - a key that was not a fact about the
+    manifest.
+    """
+    from mainframe_artifacts.fetch import fetch_dependencies
+
+    manifest = {"subject": "PROCLIB.SAMPPROC", "artifacts": [
+        _row("PROCLIB.SAMPPROC", "db2-stored-procedure")]}
+    report = fetch_dependencies(manifest, None)
+    assert report["program"] != "?"
+    row = report["members"][0] if "members" in report else report["artifacts"][0]
+    assert row["status"] == "skipped"
+    assert "being analysed" in row["reason"]
+
+
+def test_the_legacy_subject_keys_still_work():
+    """Three published view schemas already use them; a manifest recorded before
+    `subject` existed must keep working."""
+    from mainframe_artifacts.fetch import fetch_dependencies
+
+    for key in ("program", "job", "region"):
+        report = fetch_dependencies({key: "SUBJ", "artifacts": []}, None)
+        assert report["program"] == "SUBJ", key

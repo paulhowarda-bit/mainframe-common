@@ -312,12 +312,19 @@ def fetch_dependencies(manifest: dict, fetcher: Optional[Callable],
     where it came from, and what else carried the same name. Nothing is invented: a name
     that was never fetchable is reported as ``skipped`` with the reason, not dropped."""
     prefetched = prefetched or {}
-    # A COBOL manifest names its subject "program"; a JCL one names it "job" (see
-    # jcl_views.build_jcl_artifacts); a CICS one names it "region" (cics_dependencies.
-    # views), because a CSD source is neither a program nor a job. Reading only the first
+    # A producer names its own subject. `subject` is the general form and is read first;
+    # the three below are kept because three published view schemas already use them, and
+    # a manifest recorded before this key existed must keep working.
+    #
+    # The per-kind list is what this replaces. A COBOL manifest names its subject
+    # "program", a JCL one "job", a CICS one "region" - and reading only the first
     # labelled every JCL run's report `"program": "?"` and left the never-fetch-yourself
     # guard holding "?", so a job was requested from the estate as a dependency of itself.
-    program = (manifest.get("program") or manifest.get("job")
+    # The list then grew by one for every new front-end: four times so far, which is why
+    # a producer that is none of these - a Db2 stored-procedure extractor, say - has had
+    # to emit a false `program` key purely to arm the guard (upstream ledger batch 10,
+    # item 33b).
+    program = (manifest.get("subject") or manifest.get("program") or manifest.get("job")
                or manifest.get("region") or "?")
     subject = str(program).upper()
     # name -> the status the FIRST row for it actually reached. Recording the name
