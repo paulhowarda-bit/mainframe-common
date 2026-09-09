@@ -77,6 +77,12 @@ _KIND_TYPE: Dict[str, str] = {
     "program":          "cobol",
     "copybook":         "copybook",
     "db2-table":        "ddl",
+    # A user-defined type is a first-class dependency, not a detail of the table that uses
+    # it: a parameter declared Y_CHAR32 has no known length until that type's CREATE TYPE
+    # is in hand, so any byte-offset lineage through it is a guess. Retrieved the same way
+    # as any other DDL member. No front-end here emits this kind yet - a Db2 stored-
+    # procedure extractor does (upstream ledger batch 10, item 33a).
+    "db2-type":         "ddl",
     # A stored procedure's implementation is very often a COBOL load module of the same
     # name; asking the estate for it as COBOL lets a miss say "not found" honestly.
     "db2-stored-procedure": "cobol",
