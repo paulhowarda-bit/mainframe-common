@@ -3,7 +3,8 @@
 import pytest
 
 from mainframe_artifacts.artifact_service import call_service
-from mainframe_artifacts.protocol import (ArtifactFetcher, SynonymResolver,
+from mainframe_artifacts.protocol import (ArtifactFetcher, DependentsResolver,
+                                          SynonymResolver, describe_dependents_resolver,
                                           describe_fetcher, describe_synonym_resolver)
 
 
@@ -97,3 +98,26 @@ def test_the_fetcher_diagnostics_did_not_change_wording():
     assert describe_fetcher(needs_more) == (
         "requires argument(s) library that this tool does not supply - a client is "
         "called as fetcher(name), optionally with type= and copy=")
+
+
+def looks_up(name, kind=None):
+    return []
+
+
+def test_a_dependents_lookup_of_the_documented_shape_is_usable():
+    assert describe_dependents_resolver(looks_up) is None
+    # A one-argument lookup is valid: DependentsLookup drops kind= and retries.
+    assert describe_dependents_resolver(lambda name: []) is None
+    assert isinstance(looks_up, DependentsResolver)
+
+
+def test_a_dependents_lookup_demanding_extra_arguments_is_explained():
+    def needs_more(name, index):
+        return []
+    why = describe_dependents_resolver(needs_more)
+    assert why is not None and "index" in why and "lookup(name)" in why
+
+
+def test_no_dependents_lookup_and_a_non_callable_are_explained():
+    assert describe_dependents_resolver(None) == "no dependents lookup was supplied"
+    assert "not callable" in describe_dependents_resolver(42)

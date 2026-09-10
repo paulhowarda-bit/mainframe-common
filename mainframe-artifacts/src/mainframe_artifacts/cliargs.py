@@ -15,7 +15,8 @@ import logging
 from typing import Optional, Tuple
 
 from .artifact_service import DEFAULT_FETCHER, load_callable
-from .protocol import describe_synonym_resolver
+from .dependents import DependentsLookup, read_dependents_map
+from .protocol import describe_dependents_resolver, describe_synonym_resolver
 from .synonyms import SynonymLookup, read_synonym_map
 
 logger = logging.getLogger(__name__)
@@ -118,6 +119,60 @@ def synonym_lookup(args) -> Tuple[Optional[SynonymLookup], Optional[str]]:
     if mapping is None and resolver is None:
         return None, None
     return SynonymLookup(mapping, resolver), None
+
+
+def add_dependents_args(p: argparse.ArgumentParser) -> None:
+    """The two doors the REVERSE direction arrives by - what depends on this artifact.
+
+    Its own group for the same reason the synonym flags are: a front-end opts in. Nothing
+    here is on by default, and a run that opens neither door behaves exactly as it did
+    before this contract existed - the view is absent rather than empty, because "nobody
+    told us" and "nothing depends on it" are different answers."""
+    p.add_argument("--dependents-map", metavar="FILE",
+                   help="JSON file of what depends on each artifact, keyed "
+                        "\"NAME|KIND\" ({\"CUSTFILE|file\": [{\"name\": \"PGM1\", "
+                        "\"kind\": \"PROGRAM\", \"via\": \"READ FILE\"}], ...}) - "
+                        "estate-index knowledge supplied as input, never derived. The "
+                        "operator's explicit answer: an artifact the map holds is never "
+                        "asked of the resolver. An entry may be an empty list, which "
+                        "SAYS nothing depends on it; a name the file does not mention "
+                        "says nothing at all.")
+    p.add_argument("--dependents-resolver", metavar="MODULE:FUNC",
+                   help="an estate-index lookup for what depends on an artifact, asked "
+                        "at the point of need instead of handed over as a file: "
+                        "FUNC(name, kind=...) returns the rows the index holds, an empty "
+                        "sequence when it was asked and nothing depends on the "
+                        "artifact, or None when the artifact is outside what the index "
+                        "covers. It answers whatever --dependents-map does not hold. A "
+                        "lookup that RAISES has failed - flagged, and not asked again - "
+                        "and is never read as 'nothing depends on it'. No default: run "
+                        "by hand, --dependents-map is the only door.")
+
+
+def dependents_lookup(args) -> Tuple[Optional[DependentsLookup], Optional[str]]:
+    """The dependents doors this run opened, from :func:`add_dependents_args`'s flags.
+
+    Returns ``(lookup, None)`` - ``lookup`` is ``None`` when neither flag was given, and
+    a front-end's ``dependents()`` view is then ``None`` rather than empty - or
+    ``(None, why)`` when a flag named something unusable, which the caller reports and
+    exits 2 on. Exactly :func:`synonym_lookup`'s shape, for exactly its reasons."""
+    mapping = None
+    if getattr(args, "dependents_map", None):
+        mapping, why = read_dependents_map(args.dependents_map)
+        if why:
+            return None, f"--dependents-map: {why}"
+    resolver = None
+    if getattr(args, "dependents_resolver", None):
+        resolver, why = load_callable(args.dependents_resolver)
+        if why:
+            return None, f"--dependents-resolver {args.dependents_resolver}: {why}"
+        advice = describe_dependents_resolver(resolver)
+        if advice:
+            logger.warning("WARNING: --dependents-resolver %s %s",
+                           args.dependents_resolver, advice)
+    if mapping is None and resolver is None:
+        return None, None
+    return DependentsLookup(mapping, resolver), None
 
 
 def add_output_args(p: argparse.ArgumentParser, *, outdir_help: str) -> None:

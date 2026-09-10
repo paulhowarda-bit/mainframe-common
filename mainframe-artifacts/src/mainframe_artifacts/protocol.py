@@ -96,10 +96,63 @@ class SynonymResolver(Protocol):
         ...
 
 
+#: What a dependents lookup may answer with. The rows themselves, or an object carrying
+#: them with a REPORTED fan-out cap beside them (``{"rows": [...], "truncated": true,
+#: "total": 9182}``) - a host holding ten thousand callers may send the first hundred, but
+#: a shortened list that does not say so reads as a complete one.
+DependentsShape = Union[
+    None,                             # not answerable for this artifact
+    Sequence[Mapping[str, Any]],      # the rows, possibly empty
+    Mapping[str, Any],                # {"rows": [...], "truncated": ..., "total": ...}
+]
+
+
+@runtime_checkable
+class DependentsResolver(Protocol):
+    """*What depends on this artifact* - the reverse direction, which only a host holds.
+
+    Every extractor in this family answers the forward direction, because that is what an
+    artifact's own source can support: it names what it references. The reverse is not
+    unimplemented here, it is *underivable* - which programs issue ``EXEC CICS READ FILE``
+    against a file definition, which modules ``CALL`` an assembler entry point, which
+    members reference a mapset. Those facts live in an estate-wide index, so they arrive
+    the same way the catalog does: the host supplies them, and this tool never guesses
+    them.
+
+    Called with the artifact name positionally and its kind by keyword - the kind of the
+    artifact being ASKED ABOUT, from
+    :data:`~mainframe_artifacts.kinds.MANIFEST_KINDS` or a host spelling that reduces into
+    it. Both keywords are optional in the same way :class:`ArtifactFetcher`'s are: a
+    resolver whose signature is just ``f(name)`` is valid and needs no adapter, because
+    :class:`~mainframe_artifacts.dependents.DependentsLookup` drops ``kind`` and retries
+    on ``TypeError``.
+
+    **The same invariant as the two contracts above, and a third distinction this one
+    cannot do without:**
+
+        RAISING means THE LOOKUP FAILED - fixable: index unreachable, bad connection.
+
+        Returning an EMPTY sequence means THE INDEX WAS ASKED AND NOTHING DEPENDS ON
+        THIS. That is a claim about the estate, and a strong one.
+
+        Returning ``None`` means THIS ARTIFACT IS NOT ONE THE INDEX CAN ANSWER FOR - it is
+        outside what was ingested. Not the same claim, and never reported as if it were.
+
+    A lookup that returned an empty list on a connection error would make an entire estate
+    read as though nothing depends on anything - silently, and with a view that says so
+    with full confidence. A row's shape is declared in
+    :data:`~mainframe_artifacts.dependents.ROW_FIELDS`, and one that does not fit is
+    refused with the reason, exactly as a non-string synonym result is.
+    """
+
+    def __call__(self, name: str, *, kind: Optional[str] = ...) -> DependentsShape:
+        ...
+
+
 def _describe(fn: Any, *, absent: str, called_as: str, subject: str,
               convention: str) -> Optional[str]:
-    """The signature inspection :func:`describe_fetcher` and
-    :func:`describe_synonym_resolver` share; the words differ per contract."""
+    """The signature inspection the three ``describe_*`` helpers share; the words differ
+    per contract."""
     if fn is None:
         return absent
     if not callable(fn):
@@ -149,3 +202,12 @@ def describe_synonym_resolver(fn: Any) -> Optional[str]:
                      called_as="resolver(name)", subject="the table name",
                      convention="a resolver is called as resolver(name) and nothing "
                                 "else")
+
+
+def describe_dependents_resolver(fn: Any) -> Optional[str]:
+    """Explain why ``fn`` cannot work as a :class:`DependentsResolver`, or ``None`` if it
+    looks usable. Advisory only, exactly like :func:`describe_fetcher`."""
+    return _describe(fn, absent="no dependents lookup was supplied",
+                     called_as="lookup(name)", subject="the artifact name",
+                     convention="a lookup is called as lookup(name), optionally with "
+                                "kind=")
