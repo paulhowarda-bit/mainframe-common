@@ -115,6 +115,31 @@ def normalise_row(raw: Any) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
     return row, None
 
 
+#: The row as it is WRITTEN, in the family's camelCase. Here rather than in each
+#: front-end because four packages emitting ``matchStrength`` three ways is exactly the
+#: drift the shared vocabulary exists to prevent, and a consumer reading two of these
+#: views has to be able to use one reader.
+_OUTPUT_KEYS = (("name", "name"), ("kind", "kind"), ("manifest_kind", "manifestKind"),
+                ("via", "via"), ("match_strength", "matchStrength"),
+                ("detail", "detail"))
+
+
+def output_row(row: Mapping[str, Any]) -> Dict[str, Any]:
+    """One normalised row, camelCased for a view. An absent field stays absent."""
+    return {out: row[key] for key, out in _OUTPUT_KEYS if row.get(key) is not None}
+
+
+def output_rows(rows: Sequence[Mapping[str, Any]]) -> List[Dict[str, Any]]:
+    """:func:`output_row` over an answer's rows, SORTED.
+
+    Sorted so that two runs against the same index produce the same bytes whatever order
+    the host's rows arrived in - byte-stability is a promise every view in this family
+    makes. A capped answer reports the cap rather than relying on that order to carry
+    meaning."""
+    return sorted((output_row(r) for r in rows),
+                  key=lambda d: (d["name"], d.get("via", ""), d["kind"]))
+
+
 def coerce_answer(got: Any) -> Tuple[Optional[DependentsAnswer], Optional[str]]:
     """A resolver's return value, as an answer. ``(answer, None)`` or ``(None, why)``.
 
@@ -327,4 +352,5 @@ class DependentsLookup:
 
 
 __all__ = ["MATCH_STRENGTHS", "ROW_FIELDS", "DependentsAnswer", "DependentsLookup",
-           "coerce_answer", "normalise_row", "read_dependents_map"]
+           "coerce_answer", "normalise_row", "output_row", "output_rows",
+           "read_dependents_map"]
