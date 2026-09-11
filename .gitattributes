@@ -1,0 +1,27 @@
+# Every text file checks out with LF, on every platform.
+#
+# This is not a style preference - it is what makes the byte-stability ratchet mean
+# anything, and here it is load-bearing twice over.
+#
+# A parse bundle embeds the program's source VERBATIM, along with the sha256 that pins it
+# (`parse_bundle.py`). Left to git's autocrlf, a Windows checkout carries `\r\n` into that
+# text and into that hash, so `goldens/parse.sha256` describes the filesystem the bundle
+# was built on rather than the member - and a bundle written on one box would not match
+# the same source read on another.
+#
+# A member resolved from the local search path is also read as BYTES, and its length goes
+# into the retrieval reports the dependent packages hash (`bytes: 128`).
+#
+# COBOL is fixed-format source besides, where a byte count is a fact about the member
+# rather than an artifact of the filesystem it landed on.
+* text=auto eol=lf
+
+# Belt and braces for the files whose exact bytes are the contract.
+*.py      text eol=lf
+*.cbl     text eol=lf
+*.cpy     text eol=lf
+*.json    text eol=lf
+*.md      text eol=lf
+*.toml    text eol=lf
+*.sha256  text eol=lf
+*.txt     text eol=lf
