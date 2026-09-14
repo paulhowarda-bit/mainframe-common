@@ -26,7 +26,7 @@ from typing import Callable, Dict, List, Optional, Set, Tuple
 
 from .normalizer import CodeLine, SourceFormat, detect_source_format, normalize
 from .lexer import Token, tokenize
-from .data_division import elementary_subordinates, parse_data_division
+from .data_division import DataItem, elementary_subordinates, parse_data_division
 from .textutil import mask_literals
 from .preprocessor import CopybookResolver, preprocess
 from .model import (
@@ -217,18 +217,22 @@ def _split_header(cl: CodeLine) -> Optional[Tuple[str, bool, str]]:
     return name, bool(m.group(2)), (m.group(3) or "").strip()
 
 
-_VALUE_RE = re.compile(
-    r"^\s*\d+\s+([A-Z0-9][A-Z0-9-]*)\b.*?\bVALUE\b\s+(?:IS\s+)?(['\"])(.*?)\2", re.I)
-
-
-def _scan_value_clauses(lines: List[CodeLine]) -> dict:
+def _scan_value_clauses(items: List[DataItem]) -> dict:
     """Capture `<level> NAME ... VALUE 'lit'` initial values (string literals only)
-    from the DATA DIVISION, for constant propagation of CALL targets."""
+    from the DATA DIVISION, for constant propagation of CALL targets.
+
+    Sourced from the parsed data items rather than scanned line by line. A data
+    description entry runs to its terminating period and may span several physical
+    lines with no continuation indicator, so `05 WS-MOD PIC X(08)` followed by
+    `VALUE 'MODNAME'.` is two CodeLines and a per-line regex sees only the first -
+    which drops the literal and turns a resolvable dynamic CALL into a
+    runtime-determined one.
+    """
     out = {}
-    for cl in lines:
-        m = _VALUE_RE.match(cl.text)
-        if m:
-            out[m.group(1).upper()] = m.group(3).rstrip()
+    for item in items:
+        val = getattr(item, "value", None) or ""
+        if len(val) >= 2 and val[0] == val[-1] and val[0] in ("'", '"'):
+            out[item.name.upper()] = val[1:-1].rstrip()
     return out
 
 
@@ -378,8 +382,8 @@ def parse_program(source: str, fmt: Optional[SourceFormat] = None,
             "orthogonal region; recovered chart does not model the implicit transfer."
         )
 
-    prog.working_values = _scan_value_clauses(lines)
     prog.data_items, prog.data_by_name = parse_data_division(lines)
+    prog.working_values = _scan_value_clauses(prog.data_items)
     expand = _structure_expander(prog.data_items)
     prog.files = _parse_file_control(lines)
     prog.sql_cursors, prog.declared_tables = _scan_sql_declarations(lines)

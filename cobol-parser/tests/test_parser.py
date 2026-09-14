@@ -734,6 +734,50 @@ def test_select_clause_survives_a_dataset_literal_containing_select():
     assert files["F2"]["assign"] == "OUTDD"
 
 
+# -- a VALUE clause belongs to its whole entry, not to one physical line ---------
+
+_SPLIT_VALUES = (
+    "       IDENTIFICATION DIVISION.\n"
+    "       PROGRAM-ID. TSTSPLIT.\n"
+    "       DATA DIVISION.\n"
+    "       WORKING-STORAGE SECTION.\n"
+    "       01  WS-ONELINE        PIC X(08) VALUE 'AAAAMOD1'.\n"
+    "       01  WS-SPLIT-VALUE    PIC X(08)\n"
+    "                             VALUE 'BBBBMOD2'.\n"
+    "       01  WS-SPLIT-LITERAL  PIC X(08) VALUE\n"
+    "                             'CCCCMOD3'.\n"
+    "       01  WS-CONSTANTS.\n"
+    "           05  CN-DEMOC104   PIC X(08).\n"
+    "               88  DEMOC104-MODULE  VALUE 'DEMOC104'.\n"
+    "       01  WS-COUNT          PIC 9(04) VALUE 1234.\n"
+    "       PROCEDURE DIVISION.\n"
+    "       0000-MAIN.\n"
+    "           CALL WS-ONELINE.\n"
+    "           CALL WS-SPLIT-VALUE.\n"
+    "           CALL WS-SPLIT-LITERAL.\n"
+    "           GOBACK.\n")
+
+
+def test_working_values_reads_a_value_clause_carried_onto_a_later_line():
+    """A data description entry runs to its terminating period, across physical lines
+    with no continuation indicator. Scanned line by line, `VALUE 'BBBBMOD2'.` under
+    `01 WS-SPLIT-VALUE PIC X(08)` was never seen, and a dynamic CALL through it - whose
+    target the source fixes - was reported as runtime-determined."""
+    values = parse_program(_SPLIT_VALUES).working_values
+    assert values["WS-ONELINE"] == "AAAAMOD1"
+    assert values["WS-SPLIT-VALUE"] == "BBBBMOD2"
+    assert values["WS-SPLIT-LITERAL"] == "CCCCMOD3"
+
+
+def test_working_values_keeps_condition_names_and_excludes_numeric_values():
+    """The two things the per-line scan did that the entry-based one must keep doing: a
+    level-88 string VALUE is recorded under the condition name, and a numeric VALUE is
+    not a string literal, so it is not recorded at all."""
+    values = parse_program(_SPLIT_VALUES).working_values
+    assert values["DEMOC104-MODULE"] == "DEMOC104"
+    assert "WS-COUNT" not in values
+
+
 # --------------------------------------------------------------------------- #
 # Db2 cursor DECLARE attributes
 #

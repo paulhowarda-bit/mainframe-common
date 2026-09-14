@@ -294,8 +294,9 @@ class Program:
     using: List[str] = field(default_factory=list)   # PROCEDURE DIVISION USING params
     returning: Optional[str] = None                  # PROCEDURE DIVISION RETURNING
     notes: List[str] = field(default_factory=list)  # parser-level remarks
-    # data-name -> initial literal from a WORKING-STORAGE `VALUE 'lit'` clause, used
-    # by constant propagation to resolve dynamic CALL targets.
+    # data-name -> initial literal from a DATA DIVISION `VALUE 'lit'` clause (string
+    # literals only), read from the parsed data items so an entry carried across lines
+    # keeps its VALUE. A name declared more than once keeps its LAST declaration's literal.
     working_values: Dict[str, str] = field(default_factory=dict)
     # DATA DIVISION recovery (data_division.DataItem); duck-typed to avoid coupling.
     data_items: List = field(default_factory=list)
