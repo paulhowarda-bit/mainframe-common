@@ -155,3 +155,98 @@ def test_the_split_that_tears_a_move_ignores_keywords_inside_literals():
     assert split_outside_literals("'CALL TO FRCEMAIL FAILED' TO WS-ERR-MSG", "TO") == (
         "'CALL TO FRCEMAIL FAILED'", "WS-ERR-MSG")
     assert split_outside_literals("WS-A FROM WS-B", "TO") is None
+
+
+# --------------------------------------------------------------------------- #
+# chains: MOVE WS-A TO WS-B, CALL WS-B
+# --------------------------------------------------------------------------- #
+
+_CHAIN_WS = ("       01 WS-A PIC X(8) VALUE 'PGMCHAIN'.\n"
+             "       01 WS-B PIC X(8).\n"
+             "       01 WS-C PIC X(8).\n"
+             "       01 WS-D PIC X(8).\n")
+
+
+def test_a_move_from_an_item_carrying_a_literal_resolves_the_call():
+    res = _resolve(_CHAIN_WS,
+                   "           MOVE WS-A TO WS-B\n"
+                   "           CALL WS-B\n"
+                   "           GOBACK.\n", "WS-B")
+    assert (res.confident, res.resolved) == (True, "PGMCHAIN")
+    assert "through WS-A" in res.reason
+
+
+def test_the_chain_is_followed_as_far_as_it_goes():
+    res = _resolve(_CHAIN_WS,
+                   "           MOVE WS-A TO WS-B\n"
+                   "           MOVE WS-B TO WS-C\n"
+                   "           CALL WS-C\n"
+                   "           GOBACK.\n", "WS-C")
+    assert (res.confident, res.resolved) == (True, "PGMCHAIN")
+    assert "through WS-B, WS-A" in res.reason
+
+
+def test_a_non_literal_reaching_the_chain_keeps_it_flagged():
+    """WS-D is declared and nothing in the program puts a value in it, so what it
+    carries at run time is not something this analysis can name. The literal is still
+    a candidate; it is not an answer."""
+    res = _resolve(_CHAIN_WS,
+                   "           MOVE WS-A TO WS-B\n"
+                   "           MOVE WS-D TO WS-B\n"
+                   "           CALL WS-B\n"
+                   "           GOBACK.\n", "WS-B")
+    assert not res.confident and res.has_variable_assignment
+    assert res.candidates == ["PGMCHAIN"]
+
+
+def test_a_cycle_terminates():
+    res = _resolve(_CHAIN_WS,
+                   "           MOVE WS-B TO WS-C\n"
+                   "           MOVE WS-C TO WS-B\n"
+                   "           CALL WS-B\n"
+                   "           GOBACK.\n", "WS-B")
+    assert not res.confident and res.candidates == []
+    assert "set only from variables" in res.reason
+
+
+def test_a_cycle_with_a_literal_in_it_still_resolves():
+    res = _resolve(_CHAIN_WS,
+                   "           MOVE WS-A TO WS-B\n"
+                   "           MOVE WS-B TO WS-C\n"
+                   "           MOVE WS-C TO WS-B\n"
+                   "           CALL WS-C\n"
+                   "           GOBACK.\n", "WS-C")
+    assert (res.confident, res.resolved) == (True, "PGMCHAIN")
+
+
+def test_a_figurative_constant_is_a_value_this_analysis_cannot_name():
+    res = _resolve(_CHAIN_WS,
+                   "           MOVE SPACES TO WS-B\n"
+                   "           CALL WS-B\n"
+                   "           GOBACK.\n", "WS-B")
+    assert not res.confident and res.has_variable_assignment
+    assert "set only from variables" in res.reason
+
+
+def test_a_subscripted_source_names_no_single_item():
+    """Which occurrence reaches the CALL is decided at run time, so the chain stops
+    here rather than resolving to whatever the table happens to declare."""
+    res = _resolve("       01 WS-TAB.\n"
+                   "          05 WS-E PIC X(8) OCCURS 3 VALUE 'PGMTABLE'.\n"
+                   "       01 WS-B PIC X(8).\n"
+                   "       01 IDX PIC 9(2).\n",
+                   "           MOVE WS-E (IDX) TO WS-B\n"
+                   "           CALL WS-B\n"
+                   "           GOBACK.\n", "WS-B")
+    assert not res.confident and res.has_variable_assignment
+    assert "PGMTABLE" not in res.candidates
+
+
+def test_a_qualified_source_names_its_item():
+    res = _resolve("       01 GRP-A.\n"
+                   "          05 WS-Q PIC X(8) VALUE 'PGMQUAL'.\n"
+                   "       01 WS-B PIC X(8).\n",
+                   "           MOVE WS-Q OF GRP-A TO WS-B\n"
+                   "           CALL WS-B\n"
+                   "           GOBACK.\n", "WS-B")
+    assert (res.confident, res.resolved) == (True, "PGMQUAL")

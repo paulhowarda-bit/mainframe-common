@@ -3,8 +3,9 @@
 Currently: **constant propagation for dynamic CALL targets.** A `CALL identifier`
 has a runtime-determined target in general, but in the common case the identifier is
 only ever set to a literal in this program - a `WORKING-STORAGE VALUE 'POSTLOG'`
-clause or a `MOVE 'POSTLOG' TO WS-SUBPGM`. When a single literal is the *only*
-reaching value, the target resolves and the "unknown target" flag can be dropped.
+clause, a `MOVE 'POSTLOG' TO WS-SUBPGM`, or a `MOVE` of an item that itself carries
+one. When a single literal is the *only* reaching value, the target resolves and the
+"unknown target" flag can be dropped.
 
 This is a *may*-analysis, not flow-sensitive reaching-definitions: it is honest about
 that by staying flagged whenever a non-literal assignment can also reach the call, or
@@ -31,6 +32,12 @@ _MOVE_RE = re.compile(r"^MOVE\s+(.+)$", re.I)
 # split cannot land inside one and needs no literal masking.
 _SET_TRUE_RE = re.compile(r"^SET\s+(.+?)\s+TO\s+TRUE\b", re.I)
 _NAME_RE = re.compile(r"^[A-Z0-9][A-Z0-9-]*$", re.I)
+# A MOVE source that names one data item: a bare name, or a name qualified by OF / IN
+# (`WS-PGM OF GRP-A`). Literals are collected per unqualified name - which is how the
+# TARGET side records them too - so the qualifier is read and dropped, and a name
+# declared under two parents keeps both literals as candidates rather than picking one.
+_SOURCE_NAME = re.compile(
+    r"^([A-Z0-9][A-Z0-9-]*)(?:\s+(?:OF|IN)\s+[A-Z0-9][A-Z0-9-]*)*$", re.I)
 # Runs for every MOVE / SET in the program - compiled once, like its neighbours.
 _SPLIT_OPERANDS = re.compile(r"[\s,]+")
 
@@ -55,7 +62,12 @@ class CallResolution:
 @dataclass
 class CallAnalysis:
     literal_assigns: Dict[str, Set[str]]
-    var_assigns: Set[str]
+    # target -> the SOURCE of every non-literal assignment to it, as written. Recording
+    # only that "a variable was moved here" throws away the one thing needed to answer
+    # the question: `MOVE WS-A TO WS-B` with `WS-A VALUE 'POSTLOG'` makes POSTLOG the
+    # value `CALL WS-B` calls, and a chain we cannot follow is a dependency nobody
+    # reports. `resolve` walks these transitively.
+    var_assigns: Dict[str, Set[str]]
     # All data-item names visible to the parse, so an unresolvable name can be
     # diagnosed honestly: "declared but never assigned" is a different situation from
     # "not declared at all" - the latter usually means the item (and its VALUE) lives
@@ -67,19 +79,60 @@ class CallAnalysis:
     # WRITTEN to put there (via SET ... TO TRUE) - reported as candidates, not proof.
     condition_literals: Dict[str, List[str]] = field(default_factory=dict)
 
+    def _reaching(self, name: str):
+        """(literals, opaque, through) for ``name``, following assignment chains.
+
+        ``opaque`` is True when a value this analysis cannot reduce to a literal also
+        reaches - which is what keeps the answer flagged. ``through`` names the items
+        walked to get there, so a resolution can say where the literal came from.
+
+        Breadth-first over items already visited, so a cycle (`MOVE WS-A TO WS-B` and
+        `MOVE WS-B TO WS-A`) terminates instead of recursing.
+        """
+        lits: Set[str] = set(self.literal_assigns.get(name, set()))
+        opaque = False
+        through: List[str] = []
+        seen = {name}
+        queue = [name]
+        while queue:
+            item = queue.pop(0)
+            if item != name:
+                through.append(item)
+                lits |= self.literal_assigns.get(item, set())
+                if item not in self.literal_assigns and item not in self.var_assigns:
+                    # Nothing in this program puts a value here - a LINKAGE item, a
+                    # record a READ fills, a figurative constant, a numeric literal.
+                    # Whatever reaches the chain from here is not a literal we can name.
+                    opaque = True
+            for src in sorted(self.var_assigns.get(item, set())):
+                m = _SOURCE_NAME.match(src)
+                if m is None:
+                    # Subscripted, reference-modified, CORRESPONDING, a function: a real
+                    # value reaches and this analysis cannot say which item holds it.
+                    opaque = True
+                elif m.group(1).upper() not in seen:
+                    seen.add(m.group(1).upper())
+                    queue.append(m.group(1).upper())
+        return lits, opaque, through
+
     def resolve(self, name: str) -> CallResolution:
         name = name.upper()
-        lits = sorted(self.literal_assigns.get(name, set()))
+        reached, opaque, through = self._reaching(name)
+        lits = sorted(reached)
         var = name in self.var_assigns
-        if len(lits) == 1 and not var:
+        # Named only when the chain was actually walked, so the message for a directly
+        # assigned name is the one it has always been.
+        path = f" (through {', '.join(through)})" if through else ""
+        if len(lits) == 1 and not opaque:
             return CallResolution(True, lits[0], lits, False,
-                                  f"only literal reaching {name} is '{lits[0]}'",
+                                  f"only literal reaching {name} is '{lits[0]}'" + path,
                                   evidence="assigned")
-        if lits and not var:
+        if lits and not opaque:
             return CallResolution(False, None, lits, False,
-                                  f"{name} may be one of {lits}; verify reaching definition",
+                                  f"{name} may be one of {lits}; verify reaching definition"
+                                  + path,
                                   evidence="assigned")
-        if lits and var:
+        if lits and opaque:
             return CallResolution(False, None, lits, True,
                                   f"{name} set to {lits} and also to a variable; runtime-determined",
                                   evidence="assigned")
@@ -107,7 +160,7 @@ class CallAnalysis:
 
 def analyze_calls(program: Program) -> CallAnalysis:
     literal_assigns: Dict[str, Set[str]] = {}
-    var_assigns: Set[str] = set()
+    var_assigns: Dict[str, Set[str]] = {}
 
     # Seed from DATA DIVISION VALUE clauses (an initial literal value), read from the data
     # items rather than `working_values`: an item's VALUE is found wherever its entry
@@ -161,7 +214,7 @@ def analyze_calls(program: Program) -> CallAnalysis:
                         literal_assigns.setdefault(t.upper(), set()).add(lit)
                 else:
                     for t in targets:
-                        var_assigns.add(t.upper())
+                        var_assigns.setdefault(t.upper(), set()).add(source.upper())
             elif verb == "SET":
                 m = _SET_TRUE_RE.match(st.text.strip())
                 if not m:
