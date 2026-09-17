@@ -27,6 +27,23 @@ What it does, in pipeline order:
    (`IF` / `EVALUATE` / `PERFORM` / `GO TO` / I/O / `CALL` / `ALTER` / handlers /
    `EXEC` blocks), plus the DATA DIVISION as typed `DataItem`s.
 
+Beside the parse itself it carries one analysis that is pure over the AST:
+
+```python
+from cobol_parser.analysis import analyze_calls
+
+res = analyze_calls(prog).resolve("WS-SUBPGM")   # a dynamic CALL's target
+res.confident, res.resolved, res.candidates      # True, 'POSTLOG', ['POSTLOG']
+```
+
+`analyze_calls` is the constant propagation that decides what a `CALL identifier` calls:
+a `VALUE 'POSTLOG'` clause, a `MOVE 'POSTLOG' TO WS-SUBPGM`, a `SET <88> TO TRUE`, or a
+chain of `MOVE`s between data items. It is a *may*-analysis and says so — one literal and
+nothing else reaching is `confident`; anything else is candidates plus a reason. It lives
+here rather than in the statechart engine so that an estate index, or any other consumer
+of the parse, resolves the same target the statechart does instead of writing a second
+propagator that disagrees with it.
+
 Faithfulness rule inherited by every consumer: the parse records what the source says
 and where it says it (line + copybook member); what it cannot recover it leaves visibly
 unparsed — a whole paragraph that defeats the statement parser is kept as one opaque

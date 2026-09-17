@@ -16,6 +16,10 @@ consumer (the cobol-xstate statechart compiler first among them) builds on:
                         terminators / CALL / ALTER), plus the DATA DIVISION as typed
                         DataItems
 
+Beside the parse it carries ``analysis.analyze_calls``: the constant propagation that
+resolves a dynamic ``CALL identifier`` to the program it calls, which is pure over this
+AST and is therefore every parse consumer's, not the statechart engine's alone.
+
 This distribution carries NO modelling engine: it depends only on mainframe-artifacts
 (the estate boundary), and anything downstream - statecharts, views, emitters - lives
 in its consumers. Faithfulness rule inherited by every consumer: the parse records

@@ -7,7 +7,7 @@ no runtime dependencies, Python ≥ 3.9.
 | Distribution (= directory) | What it is | Depends on |
 |---|---|---|
 | `mainframe-artifacts` | the estate boundary: the artifact-service protocol, two-stage dependency retrieval, the replayable estate bundle | nothing |
-| `cobol-parser` | the IBM Enterprise COBOL parse front-end: source → `Program` AST (normalize / preprocess COPY/REPLACING / lex / parse / data division), `cobol-parser` CLI → parse bundle | mainframe-artifacts |
+| `cobol-parser` | the IBM Enterprise COBOL parse front-end: source → `Program` AST (normalize / preprocess COPY/REPLACING / lex / parse / data division), dynamic-CALL constant propagation over that AST, `cobol-parser` CLI → parse bundle | mainframe-artifacts |
 
 The consumers live in their own repositories, and this repo knows nothing about them:
 

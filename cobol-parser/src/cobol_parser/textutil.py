@@ -2,13 +2,15 @@
 
 Moved here from ``cobol_xstate.semantics`` when the parse front-end became its own
 distribution: the parser needs :func:`mask_literals` to tear statements safely, and the
-front-end must not import the modelling engine. ``cobol_xstate.semantics`` re-imports
-these, so its consumers are unchanged.
+front-end must not import the modelling engine. :func:`split_outside_literals` followed
+when the dynamic-CALL resolver moved to :mod:`cobol_parser.analysis`, which tears a MOVE
+with it. ``cobol_xstate.semantics`` re-imports these, so its consumers are unchanged.
 """
 
 from __future__ import annotations
 
 import re
+from typing import Optional, Tuple
 
 # A quoted alphanumeric literal is DATA, not syntax - the words inside it must never be
 # read as keywords. Same rule, same idiom as `data_division._QUOTED` (a VALUE literal
@@ -32,3 +34,16 @@ def mask_literals(text: str) -> str:
     masked span.)
     """
     return _QUOTED.sub(lambda m: "\x00" * (m.end() - m.start()), text)
+
+
+def split_outside_literals(text: str, keyword: str) -> Optional[Tuple[str, str]]:
+    """Split ``text`` at the first whitespace-delimited ``keyword`` OUTSIDE any quoted
+    literal; ``None`` when no such keyword exists.
+
+    The scan runs over the masked copy; the split then slices the ORIGINAL text,
+    literals intact.
+    """
+    m = re.search(rf"\s+{re.escape(keyword)}\s+", mask_literals(text), flags=re.I)
+    if m is None:
+        return None
+    return text[:m.start()], text[m.end():]
