@@ -1,13 +1,14 @@
 # mainframe-common
 
 The shared foundation of the mainframe-modernization toolset: **one repository shipping
-two distributions**, each with its own `pyproject.toml`. Pure Python standard library,
+three distributions**, each with its own `pyproject.toml`. Pure Python standard library,
 no runtime dependencies, Python ≥ 3.9.
 
 | Distribution (= directory) | What it is | Depends on |
 |---|---|---|
 | `mainframe-artifacts` | the estate boundary: the artifact-service protocol, two-stage dependency retrieval, the replayable estate bundle | nothing |
 | `cobol-parser` | the IBM Enterprise COBOL parse front-end: source → `Program` AST (normalize / preprocess COPY/REPLACING / lex / parse / data division), dynamic-CALL constant propagation over that AST, `cobol-parser` CLI → parse bundle | mainframe-artifacts |
+| `cics-parser` | the IBM CICS definition front-end: which physical format a member is (DFHCSDUP deck or `LIST` report, macro table deck, BMS, BAS, bundle, SIT) and its text → statements | nothing |
 
 The consumers live in their own repositories, and this repo knows nothing about them:
 
@@ -17,9 +18,13 @@ The consumers live in their own repositories, and this repo knows nothing about 
 - [`jcl-dependencies`](https://github.com/paulhowarda-bit/jcl-dependencies) — the JCL
   front-end (depends on **mainframe-artifacts only**). The two front-ends are peers: neither imports
   the other.
+- [`cics-dependencies`](https://github.com/paulhowarda-bit/cics-dependencies) — the CICS
+  region extractor (depends on **mainframe-artifacts and cics-parser**). Its reader lives
+  here so that any second reader of the same members lexes them with the same code.
 
-The dependency arrows point one way — `cobol_parser` imports `mainframe_artifacts`, and
-nothing here imports a modelling engine. A third-party parser consumer gets `source in,
+The dependency arrows point one way — `cobol_parser` imports `mainframe_artifacts`,
+`cics_parser` imports nothing at all, and nothing here imports a modelling engine or an
+extractor. A third-party parser consumer gets `source in,
 Program out` and carries nothing else; the venv proof lives with the consumer
 (`tools/prove_separation.py` in cobol-xstate-json).
 
@@ -27,6 +32,7 @@ Program out` and carries nothing else; the venv proof lives with the consumer
 
 ```bash
 python -m pip install -e mainframe-artifacts -e cobol-parser        # from a checkout
+python -m pip install -e cics-parser                                # no dependencies
 ```
 
 Or, until the distributions are on an index, straight from the repo — both in one
@@ -57,7 +63,7 @@ for the pipeline stages and the faithfulness rule every consumer inherits.
 ## Develop
 
 ```bash
-python -m pytest -q                        # both suites, nothing installed (root pyproject)
+python -m pytest -q                        # all three suites, nothing installed (root pyproject)
 python tools/byteproof.py --check goldens/parse.sha256   # the byte-stability ratchet
 ```
 
@@ -66,8 +72,13 @@ for every `examples/*.cbl`, estate-free. Re-record with `--record` **only** when
 bundle change is intended and reviewed. The downstream views (statechart, lineage,
 reactive, …) are ratcheted where they are produced, by cobol-xstate-json's
 `tools/gate.py` — a parse change that survives this repo's ratchet can still move bytes
-there, so run both when touching the parser.
+there, so run both when touching the parser. `cics-parser` has no ratchet here at all:
+what it reads is ratcheted where it becomes views, by cics-dependencies'
+`tools/byteproof.py --check goldens/views.sha256`, which is the check to run after
+touching the CICS reader.
 
 This repo was lifted out of cobol-xstate-json (its `core/` and `parser/` directories — since renamed to `mainframe-artifacts/` and `cobol-parser/` —
 history preserved there — `git log --follow` in that repo reaches every pre-split
-change).
+change). `cics-parser` was lifted out of cics-dependencies the same way (its
+`src/cics_dependencies/lexer.py` and the dialect half of `detect.py`), whose history
+reaches every change made before the move.

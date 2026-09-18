@@ -1,5 +1,5 @@
-"""Repo-root pytest configuration: covers both ``testpaths`` (``mainframe-artifacts/tests``
-and ``cobol-parser/tests``)."""
+"""Repo-root pytest configuration: covers every ``testpaths`` entry
+(``mainframe-artifacts/tests``, ``cobol-parser/tests`` and ``cics-parser/tests``)."""
 
 import logging
 

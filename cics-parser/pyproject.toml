@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cics-parser"
+version = "0.1.0"
+description = "IBM CICS definition front-end: which physical format a source is (DFHCSDUP deck or LIST report, macro table deck, BMS, BAS, bundle, SIT) and its text -> statements."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "Paul Howard" }]
+keywords = ["cics", "csd", "dfhcsdup", "mainframe", "parser", "lexer"]
+
+# Nothing at all. The lexer and the dialect decision are the physical-text layer only;
+# the estate boundary (mainframe-artifacts) belongs to whoever retrieves the members, and
+# what a statement means belongs to the consumer that reads it.
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest>=7"]
+
+[tool.setuptools.packages.find]
+where = ["src"]

@@ -1,22 +1,26 @@
-# Development root. This is NOT a distribution - the two that ship from this repo
-# live in mainframe-artifacts/ and cobol-parser/, each with its own pyproject.toml:
+# Development root. This is NOT a distribution - the three that ship from this repo
+# live in mainframe-artifacts/, cobol-parser/ and cics-parser/, each with its own
+# pyproject.toml:
 #
 #   mainframe-artifacts/  the estate boundary, two-stage retrieval, the replayable
 #                         bundle - shared by every front-end
 #   cobol-parser/         IBM Enterprise COBOL source -> Program AST
 #                         (depends on mainframe-artifacts)
+#   cics-parser/          CICS definition source -> statements, and which dialect it is
+#                         (depends on nothing)
 #
 # The consumers live in their own repositories: cobol-xstate (the statechart modelling
-# engine, in cobol-xstate-json) depends on both distributions here; jcl-dependencies
-# depends on mainframe-artifacts only. Neither is needed to develop, test, or use what this repo ships.
+# engine, in cobol-xstate-json) depends on mainframe-artifacts and cobol-parser;
+# cics-dependencies on mainframe-artifacts and cics-parser; jcl-dependencies on
+# mainframe-artifacts only. Neither is needed to develop, test, or use what this repo ships.
 #
 # What this file exists for is running this repo's suite from a checkout with nothing
 # installed. Install for real with:
 #
-#   python -m pip install -e mainframe-artifacts -e cobol-parser
+#   python -m pip install -e mainframe-artifacts -e cobol-parser -e cics-parser
 
 [tool.pytest.ini_options]
-# Both source trees on sys.path, so `python -m pytest` works with nothing installed
+# Every source tree on sys.path, so `python -m pytest` works with nothing installed
 # (pytest >= 7).
-pythonpath = ["mainframe-artifacts/src", "cobol-parser/src"]
-testpaths = ["mainframe-artifacts/tests", "cobol-parser/tests"]
+pythonpath = ["mainframe-artifacts/src", "cobol-parser/src", "cics-parser/src"]
+testpaths = ["mainframe-artifacts/tests", "cobol-parser/tests", "cics-parser/tests"]
