@@ -1,7 +1,7 @@
 """Physical text -> statements.
 
-Three dialects will live here, because a deck's dialect is not reliably declared and the
-caller should not have to know it before reading it. This module implements the first:
+Three dialects live here, because a deck's dialect is not reliably declared and the
+caller should not have to know it before reading it:
 
 **CSD command syntax** - a ``DFHCSDUP`` SYSIN deck, and the ``DEFINE``-shaped output of a
 ``DFHCSDUP EXTRACT``. Free-form to column 72, columns 73-80 ignored as sequence numbers,
@@ -14,8 +14,17 @@ control and the right margin of each header carries the report's print timestamp
 read here because it is what a site's whole-region CSD dump usually IS - the deck that
 built the region is long gone, and refusing the listing means recovering nothing from it.
 
-Still to come: the assembler column rules for the macro table decks (1-71, column-72
-continuation resuming at 16).
+**The assembler dialect** - macro table decks and BMS: columns 1-71, a column-72
+continuation resuming at column 16, the operand field ending at the first blank outside
+quotes and parentheses.
+
+**Every dialect takes lines as well as text** (``lex_csd_lines`` and its two siblings),
+numbered from ``first_line``, so a caller that never holds a whole member - an index
+parsing a 60 MB region dump in overlapping windows - can lex a window and still get the
+line each statement occupies in the file. Two decisions are made once per SOURCE, never
+per window: the column-72 margin (from the longest line) and ASA carriage control (from
+column 1 of every line). A window cannot see either, so a :class:`Prelude` carrying the
+two facts is passed in; without one, the lines given are taken to be the whole source.
 
 Two rules here were wrong until real source was read, and both are the kind of thing that
 produces plausible-looking output rather than an error:
@@ -35,7 +44,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-from typing import List, Optional, Set, Tuple
+from typing import FrozenSet, Iterable, List, Optional, Set, Tuple
 
 #: The DFHCSDUP command verbs. A line whose first token is one of these starts a new
 #: statement - subject to the disambiguation rule below.
@@ -101,6 +110,39 @@ class Statement:
 # physical lines
 # --------------------------------------------------------------------------- #
 
+@dataclass(frozen=True)
+class Prelude:
+    """The two facts about a WHOLE source that decide how each of its lines is read.
+
+    ``longest`` decides the margin (``margin_for``) and ``column_one`` - the first
+    character of every non-blank line - decides ASA carriage control
+    (``uses_asa_control``). A window of a source cannot see either, and getting either
+    wrong is silent: one wide line in window 9 is what decides that window 1 is not card
+    images. Both are incremental - a running maximum and a set union - so a caller that
+    streams the source computes them in the one pass :meth:`of` makes.
+    """
+
+    longest: int = 0
+    column_one: FrozenSet[str] = frozenset()
+
+    @classmethod
+    def of(cls, lines: Iterable[str]) -> "Prelude":
+        """Read every line once. Terminators are ignored, so an open file's lines can be
+        passed as they are."""
+        longest, seen = 0, set()
+        for line in lines:
+            line = line.rstrip("\r\n")
+            longest = max(longest, len(line))
+            if line.strip():
+                seen.add(line[:1])
+        return cls(longest, frozenset(seen))
+
+    @property
+    def asa(self) -> bool:
+        """Is column 1 carriage control rather than data?"""
+        return bool(self.column_one) and self.column_one <= _ASA_CONTROL
+
+
 def margin_for(text: str, flags: List[str]) -> Optional[int]:
     """The column this source is cut at, or ``None`` when it is not card images at all.
 
@@ -108,7 +150,11 @@ def margin_for(text: str, flags: List[str]) -> Optional[int]:
     flag per offending line is how a 320,000-line region dump produced a flag list longer
     than itself.
     """
-    longest = max((len(line) for line in text.splitlines()), default=0)
+    return _margin(Prelude.of(text.splitlines()), flags)
+
+
+def _margin(prelude: Prelude, flags: List[str]) -> Optional[int]:
+    longest = prelude.longest
     if longest <= CARD_COLUMNS:
         return MARGIN
     flags.append(
@@ -265,11 +311,25 @@ def lex_csd(text: str, commands=COMMANDS,
     Flags are file-level: a truncated line, an unclosed parenthesis, text before the first
     command. Anything a statement itself is unhappy about rides on the statement.
     """
+    return lex_csd_lines(text.splitlines(), commands, paren_commands)
+
+
+def lex_csd_lines(lines: Iterable[str], commands=COMMANDS, paren_commands=frozenset(), *,
+                  first_line: int = 1,
+                  prelude: Optional[Prelude] = None) -> Tuple[List[Statement], List[str]]:
+    """``lex_csd`` over lines numbered from ``first_line``: a window of a larger source.
+
+    Pass the WHOLE source's ``prelude``: without one the margin is decided from these lines
+    alone, which is right only when they are the whole source.
+    """
+    if prelude is None:
+        lines = list(lines)
+        prelude = Prelude.of(lines)
     flags: List[str] = []
     statements: List[Statement] = []
     current: Optional[Statement] = None
     pending: List[Tuple[int, str]] = []
-    margin = margin_for(text, flags)
+    margin = _margin(prelude, flags)
     cut: Set[int] = set()
 
     def close() -> None:
@@ -286,7 +346,7 @@ def lex_csd(text: str, commands=COMMANDS,
                     "text past column %d was cut from line(s) %s of this definition"
                     % (MARGIN, ", ".join(str(n) for n in lost)))
 
-    for lineno, raw in enumerate(text.splitlines(), start=1):
+    for lineno, raw in enumerate(lines, start=first_line):
         line = _strip_margin(raw.rstrip("\r\n"), lineno, flags, margin, cut)
         if line[:1] == "*":
             continue
@@ -352,8 +412,7 @@ def uses_asa_control(lines: List[str]) -> bool:
     the control character joins the first keyword (`1FILE(...)` matches nothing), and
     stripped when it was data every object loses the first letter of its type.
     """
-    seen = {line[:1] for line in lines if line.strip()}
-    return bool(seen) and seen <= _ASA_CONTROL
+    return Prelude.of(lines).asa
 
 
 def lex_csd_report(text: str) -> Tuple[List[Statement], List[str]]:
@@ -370,12 +429,25 @@ def lex_csd_report(text: str) -> Tuple[List[Statement], List[str]]:
     from a listing is indistinguishable from the same resource recovered from the deck
     that made it - which is the point, because for most regions the deck is long gone.
     """
+    return lex_csd_report_lines(text.splitlines())
+
+
+def lex_csd_report_lines(lines: Iterable[str], *, first_line: int = 1,
+                         prelude: Optional[Prelude] = None
+                         ) -> Tuple[List[Statement], List[str]]:
+    """``lex_csd_report`` over lines numbered from ``first_line``: a window of a listing.
+
+    Pass the WHOLE source's ``prelude``: without one, whether column 1 is carriage control
+    is decided from these lines alone, which is right only when they are the whole source.
+    """
+    if prelude is None:
+        lines = list(lines)
+        prelude = Prelude.of(lines)
     flags: List[str] = []
     statements: List[Statement] = []
     current: Optional[Statement] = None
     pending: List[Tuple[int, str]] = []
-    lines = [line.rstrip("\r\n") for line in text.splitlines()]
-    asa = uses_asa_control(lines)
+    asa = prelude.asa
 
     def close() -> None:
         if current is not None:
@@ -383,7 +455,8 @@ def lex_csd_report(text: str) -> Tuple[List[Statement], List[str]]:
             current.operands.extend(
                 _split_operands(joined, spans, current.flags, current.damaged))
 
-    for lineno, raw in enumerate(lines, start=1):
+    for lineno, raw in enumerate(lines, start=first_line):
+        raw = raw.rstrip("\r\n")
         line = raw[1:] if asa else raw
         if not line.strip():
             continue
@@ -525,12 +598,23 @@ def lex_macro(text: str) -> Tuple[List[MacroStatement], List[str]]:
     """Split an assembler deck into macro statements. Returns (statements, flags).
 
     Only the physical format is handled here - which columns are read, how a statement
-    continues, what is a comment. Which macros mean what is ``tables.py``'s and ``bms.py``'s
-    business, and neither should have to know about column 72.
+    continues, what is a comment. Which macros mean what is the consumer's business (in
+    cics-dependencies, ``tables.py``'s and ``bms.py``'s), and neither should have to know
+    about column 72.
 
     Conditional assembly is NOT evaluated. A table deck inside an ``AIF`` is the same
     problem ``asm-dependencies`` solves with ``&SYSPARM``, and pretending to decide it here
     would produce a deck that never assembles. Such statements are flagged instead.
+    """
+    return lex_macro_lines(text.splitlines())
+
+
+def lex_macro_lines(lines: Iterable[str], *,
+                    first_line: int = 1) -> Tuple[List[MacroStatement], List[str]]:
+    """``lex_macro`` over lines numbered from ``first_line``: a window of a deck.
+
+    No prelude: the assembler dialect decides nothing per source. Its column 72 is a
+    continuation indicator on every line, not a margin a wide file can move.
     """
     flags: List[str] = []
     statements: List[MacroStatement] = []
@@ -553,7 +637,7 @@ def lex_macro(text: str) -> Tuple[List[MacroStatement], List[str]]:
             joined, _line_at(spans, 0) if spans else start)
         statements.append(stmt)
 
-    for lineno, raw in enumerate(text.splitlines(), start=1):
+    for lineno, raw in enumerate(lines, start=first_line):
         line = raw.rstrip("\r\n")
         if line[:1] in ("*", ".") and not joining:
             continue
