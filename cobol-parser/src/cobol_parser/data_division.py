@@ -101,6 +101,12 @@ _USAGES = {
 
 # A quoted VALUE literal is DATA, not syntax - its text must never be read as a clause.
 _QUOTED = re.compile(r"'[^']*'|\"[^\"]*\"")
+# An FD/SD entry's `DATA RECORD IS r` / `DATA RECORDS ARE r1 r2` (IS/ARE optional), and
+# the words that begin its other clauses - where the list of record names ends.
+_DATA_RECORDS = re.compile(r"\bDATA\s+RECORDS?\s+(?:(?:IS|ARE)\s+)?(.*)$")
+_FD_CLAUSE_WORDS = frozenset((
+    "BLOCK", "RECORD", "RECORDS", "LABEL", "VALUE", "DATA", "LINAGE", "RECORDING",
+    "CODE-SET", "REPORT", "REPORTS", "IS", "EXTERNAL", "GLOBAL"))
 # Clauses whose operand is a data-NAME the programmer chose. The name is not syntax
 # either, so `REDEFINES INDEX-TAB` must not make this item USAGE INDEX.
 _NAME_OPERAND = re.compile(r"\b(?:REDEFINES|RENAMES|DEPENDING\s+ON)\s+[A-Z0-9-]+", re.I)
@@ -205,12 +211,31 @@ def _data_region(lines: List[CodeLine]) -> List[CodeLine]:
     return lines[start + 1:end if end is not None else len(lines)]
 
 
-def _entries(region: List[CodeLine]):
+def _data_record_names(fd_text: str) -> List[str]:
+    """The record names an FD/SD entry's ``DATA RECORD IS`` / ``DATA RECORDS ARE``
+    clause lists, in order - the file's own statement of which records are its."""
+    m = _DATA_RECORDS.search(_QUOTED.sub(" ", fd_text.upper()))
+    names: List[str] = []
+    for word in re.split(r"[\s,.]+", m.group(1).strip(" .")) if m else []:
+        if word in _FD_CLAUSE_WORDS or not re.fullmatch(r"[A-Z0-9][A-Z0-9-]*", word):
+            break                               # the next clause begins
+        names.append(word)
+    return names
+
+
+def _entries(region: List[CodeLine], fd_records: Optional[Dict[str, List[str]]] = None):
     """Yield (text, line, section, origin, fd) for each level-numbered data entry,
     where ``fd`` is the enclosing FD/SD file name inside the FILE SECTION (None
-    elsewhere) - the record <-> file association the external interface needs."""
+    elsewhere) - the record <-> file association the external interface needs.
+
+    The FD/SD entry itself runs to its own period and is no data entry. Its clause lines
+    used to be appended to whatever entry was open above it, so the last item of one
+    record read ``RECORDING MODE IS F LABEL RECORDS ...`` - or ``VALUE OF FILE-ID IS``,
+    which is a VALUE. When ``fd_records`` is given, each FD's ``DATA RECORD`` names are
+    recorded in it."""
     section = None
     fd = None
+    fd_buf: List[str] = []                      # the open FD/SD entry, until its period
     buf: List[str] = []
     first_line = 0
     first_origin = None
@@ -230,10 +255,23 @@ def _entries(region: List[CodeLine]):
                 buf = []
             section = sec
             fd = None
+            fd_buf = []
             continue
         fm = re.match(r"^(?:FD|SD)\s+([A-Z0-9][A-Z0-9-]*)", up)
         if fm:
             fd = fm.group(1)  # records that follow belong to this file
+            if buf:
+                yield " ".join(buf), first_line, section, first_origin, first_fd
+                buf = []
+            fd_buf = [t]
+        elif fd_buf:
+            fd_buf.append(t)
+        if fd_buf:
+            if t.endswith("."):
+                names = _data_record_names(" ".join(fd_buf))
+                if names and fd_records is not None:
+                    fd_records[fd] = names
+                fd_buf = []
             continue
         if up.startswith(("FD ", "SD ", "RD ", "FD.", "01 FD")) or up in ("FD", "SD"):
             # File/sort descriptions - skip the FD line itself; its 01 follows.
@@ -260,14 +298,16 @@ def _entries(region: List[CodeLine]):
         yield " ".join(buf), first_line, section, first_origin, first_fd
 
 
-def parse_data_division(lines: List[CodeLine]):
-    """Return (items, by_name) recovered from the DATA DIVISION."""
+def parse_data_division(lines: List[CodeLine],
+                        fd_records: Optional[Dict[str, List[str]]] = None):
+    """Return (items, by_name) recovered from the DATA DIVISION. ``fd_records``, when
+    given, is filled with each FD/SD's ``DATA RECORD`` names (file -> records)."""
     items: List[DataItem] = []
     region = _data_region(lines)
     parent_stack: List[DataItem] = []  # (group items by level)
     last_elementary: Dict[int, DataItem] = {}
 
-    for text, line, section, origin, fd in _entries(region):
+    for text, line, section, origin, fd in _entries(region, fd_records):
         m = re.match(r"^(\d{1,2})\s+([A-Z0-9][A-Z0-9-]*|FILLER)\b(.*)$", text, re.I)
         if not m:
             continue

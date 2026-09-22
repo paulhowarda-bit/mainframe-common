@@ -11,7 +11,7 @@ from cobol_parser.parser import parse_program
 from cobol_parser.textutil import split_outside_literals
 
 
-def _resolve(ws: str, proc: str, name: str):
+def _resolve(ws: str, proc: str, name: str, operand_limit=None):
     src = (
         "       IDENTIFICATION DIVISION.\n"
         "       PROGRAM-ID. CALLRES.\n"
@@ -20,7 +20,7 @@ def _resolve(ws: str, proc: str, name: str):
         "       PROCEDURE DIVISION.\n"
         "       0000-MAIN.\n" + proc
     )
-    return analyze_calls(parse_program(src)).resolve(name)
+    return analyze_calls(parse_program(src)).resolve(name, operand_limit=operand_limit)
 
 
 def test_a_value_clause_is_the_literal_that_reaches():
@@ -250,3 +250,141 @@ def test_a_qualified_source_names_its_item():
                    "           CALL WS-B\n"
                    "           GOBACK.\n", "WS-B")
     assert (res.confident, res.resolved) == (True, "PGMQUAL")
+
+
+# --------------------------------------------------------------------------- #
+# A literal that cannot be the name the call invokes is never offered as one
+# --------------------------------------------------------------------------- #
+
+def test_a_literal_longer_than_the_item_is_not_its_value():
+    """A 25-character message reaching an 8-byte item through a MOVE chain cannot be
+    what the item holds, so it is no candidate - but it is kept, with its reason."""
+    res = _resolve("       01 WS-PGM PIC X(08).\n"
+                   "       01 WS-MSG PIC X(25) VALUE 'RUN COMPLETED NORMALLY OK'.\n",
+                   "           MOVE WS-MSG TO WS-PGM\n"
+                   "           MOVE 'PGMREALA' TO WS-PGM\n"
+                   "           CALL WS-PGM\n"
+                   "           GOBACK.\n", "WS-PGM")
+    assert res.candidates == ["PGMREALA"]
+    assert res.rejected == [{"literal": "RUN COMPLETED NORMALLY OK", "reason": "length"}]
+
+
+def test_a_rejected_literal_never_promotes_the_one_that_remains():
+    """One admissible name left is not one name reaching: the rejected literal also
+    reaches the call, so it stays flagged rather than resolving by elimination."""
+    res = _resolve("       01 WS-PGM PIC X(08) VALUE 'ZZZZZZZZ'.\n",
+                   "           MOVE 'PGMREALA' TO WS-PGM\n"
+                   "           CALL WS-PGM\n"
+                   "           GOBACK.\n", "WS-PGM")
+    assert not res.confident and res.resolved is None
+    assert res.candidates == ["PGMREALA"] and res.evidence == "assigned"
+    assert "not a name: 'ZZZZZZZZ' (filler)" in res.reason
+
+
+def test_a_literal_holding_a_blank_is_not_a_name():
+    res = _resolve("       01 WS-PGM PIC X(08).\n",
+                   "           MOVE 'SEE LOG' TO WS-PGM\n"
+                   "           CALL WS-PGM\n"
+                   "           GOBACK.\n", "WS-PGM")
+    assert (res.confident, res.candidates) == (False, [])
+    assert res.rejected == [{"literal": "SEE LOG", "reason": "space"}]
+    assert res.reason.startswith("no literal that can be a name reaches WS-PGM")
+
+
+def test_cics_passes_eight_characters_of_a_longer_item():
+    """A PIC X(9) holding `ABC40001C` LINKs to ABC40001: CICS reads 8 characters of a
+    PROGRAM() operand whatever the item's length. A batch CALL has no such bound."""
+    ws = "       01 WS-LNK-TARGET PIC X(09) VALUE 'ABC40001C'.\n"
+    proc = ("           EXEC CICS LINK PROGRAM(WS-LNK-TARGET) END-EXEC\n"
+            "           GOBACK.\n")
+    res = _resolve(ws, proc, "WS-LNK-TARGET", operand_limit=8)
+    assert (res.confident, res.resolved, res.candidates) == (True, "ABC40001", ["ABC40001"])
+    assert "'ABC40001C' -> 'ABC40001'" in res.reason and not res.rejected
+    assert _resolve(ws, proc, "WS-LNK-TARGET").resolved == "ABC40001C"
+
+
+def test_two_literals_that_pass_the_same_eight_characters_are_one_program():
+    res = _resolve("       01 WS-LNK-TARGET PIC X(09).\n"
+                   "       01 WS-FLAG PIC X.\n",
+                   "           IF WS-FLAG = 'A'\n"
+                   "               MOVE 'ABC40001C' TO WS-LNK-TARGET\n"
+                   "           ELSE\n"
+                   "               MOVE 'ABC40001D' TO WS-LNK-TARGET\n"
+                   "           END-IF\n"
+                   "           EXEC CICS LINK PROGRAM(WS-LNK-TARGET) END-EXEC\n"
+                   "           GOBACK.\n", "WS-LNK-TARGET", operand_limit=8)
+    assert (res.confident, res.resolved) == (True, "ABC40001")
+    assert res.reason.startswith("only name reaching WS-LNK-TARGET is 'ABC40001'")
+
+
+def test_a_wildcard_template_gives_way_to_the_88_values():
+    """The VALUE is a template (`ABCDE***`), the 88-level names the real programs.
+    With the template gone the declared values are the answer - at their weaker grade."""
+    res = _resolve("       01 WS-LNK-TARGET PIC X(08) VALUE 'ABCDE***'.\n"
+                   "           88 WS-LNK-TARGET-GOOD VALUE 'ABCDE200' 'ABCDE300'.\n",
+                   "           CALL WS-LNK-TARGET\n"
+                   "           GOBACK.\n", "WS-LNK-TARGET")
+    assert not res.confident
+    assert res.candidates == ["ABCDE200", "ABCDE300"] and res.evidence == "declared-88"
+    assert res.rejected == [{"literal": "ABCDE***", "reason": "wildcard"}]
+
+
+def test_a_placeholder_is_rejected_on_its_question_marks():
+    res = _resolve("       01 WS-PGM PIC X(08).\n",
+                   "           MOVE 'ABCD??X' TO WS-PGM\n"
+                   "           CALL WS-PGM\n"
+                   "           GOBACK.\n", "WS-PGM")
+    assert (res.confident, res.candidates) == (False, [])
+    assert res.rejected == [{"literal": "ABCD??X", "reason": "wildcard"}]
+
+
+def test_an_undeclared_receiver_is_never_rejected_for_length():
+    """With no declaration in sight (its copybook did not arrive) nothing fixes the
+    item's length, so only the name tests apply: the filter must not start discarding
+    candidates in exactly the situation where the parse cannot see the PIC."""
+    res = _resolve("",
+                   "           MOVE 'ABCDEFGHIJKL' TO WS-GONE\n"
+                   "           MOVE 'PGMREALA' TO WS-GONE\n"
+                   "           CALL WS-GONE\n"
+                   "           GOBACK.\n", "WS-GONE")
+    assert res.candidates == ["ABCDEFGHIJKL", "PGMREALA"] and not res.rejected
+
+
+def test_a_filler_goes_and_both_real_names_stay():
+    """The regression that matters is not that the filler goes: it is that the filter
+    must not narrow the list to one, which would silently drop a real dispatch target."""
+    res = _resolve("       01 WS-DSP-PGM PIC X(8) VALUE 'ZZZZZZZZ'.\n"
+                   "       01 WS-DSP-PGM-ONE PIC X(8) VALUE 'PGMDSP0A'.\n"
+                   "       01 WS-DSP-PGM-TWO PIC X(8) VALUE 'PGMDSP0B'.\n"
+                   "       01 WS-FLAG PIC X.\n",
+                   "           IF WS-FLAG = 'A'\n"
+                   "               MOVE WS-DSP-PGM-ONE TO WS-DSP-PGM\n"
+                   "           ELSE\n"
+                   "               MOVE WS-DSP-PGM-TWO TO WS-DSP-PGM\n"
+                   "           END-IF\n"
+                   "           CALL WS-DSP-PGM\n"
+                   "           GOBACK.\n", "WS-DSP-PGM")
+    assert res.candidates == ["PGMDSP0A", "PGMDSP0B"]
+    assert res.evidence == "assigned" and not res.has_variable_assignment
+    assert res.rejected == [{"literal": "ZZZZZZZZ", "reason": "filler"}]
+
+
+def test_a_short_repeated_run_is_still_a_name():
+    """`ZZ` and `XXX` are plausible prefixes of a real member name; only four or more of
+    one character is a fill pattern."""
+    res = _resolve("       01 WS-PGM PIC X(08) VALUE 'XXX'.\n",
+                   "           CALL WS-PGM\n"
+                   "           GOBACK.\n", "WS-PGM")
+    assert (res.confident, res.resolved) == (True, "XXX")
+
+
+def test_a_group_receiver_is_never_rejected_for_length():
+    """A group's length is its children's; nothing here sizes it, so no literal is
+    discarded for length - the same rule as an undeclared item."""
+    res = _resolve("       01 WS-PGM.\n"
+                   "          05 WS-PGM-PFX PIC X(4).\n"
+                   "          05 WS-PGM-SFX PIC X(4).\n",
+                   "           MOVE 'ABCDEFGHIJ' TO WS-PGM\n"
+                   "           CALL WS-PGM\n"
+                   "           GOBACK.\n", "WS-PGM")
+    assert (res.confident, res.resolved) == (True, "ABCDEFGHIJ")

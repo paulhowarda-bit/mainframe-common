@@ -382,7 +382,8 @@ def parse_program(source: str, fmt: Optional[SourceFormat] = None,
             "orthogonal region; recovered chart does not model the implicit transfer."
         )
 
-    prog.data_items, prog.data_by_name = parse_data_division(lines)
+    prog.data_items, prog.data_by_name = parse_data_division(
+        lines, fd_records=prog.fd_data_records)
     prog.working_values = _scan_value_clauses(prog.data_items)
     expand = _structure_expander(prog.data_items)
     prog.files = _parse_file_control(lines)

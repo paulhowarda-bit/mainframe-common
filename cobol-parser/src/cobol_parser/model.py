@@ -304,6 +304,10 @@ class Program:
     # FILE-CONTROL SELECT entries: file -> {assign, organization, access, recordKey,
     # statusField} (the file's external binding and its status-response field).
     files: Dict[str, dict] = field(default_factory=dict)
+    # FD/SD file -> the record names its `DATA RECORD(S)` clause lists. The one link
+    # from a record back to its file that survives the record's 01 arriving through a
+    # COPY that did not resolve; files with no such clause are absent.
+    fd_data_records: Dict[str, List[str]] = field(default_factory=dict)
     # COPY / EXEC SQL INCLUDE dependencies (from the preprocessor): each
     # {member, status, via, replacing}. A compile-time source dependency, not a runtime
     # endpoint - carried so the related-artifact manifest can list copybooks.

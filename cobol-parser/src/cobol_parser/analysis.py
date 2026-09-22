@@ -24,6 +24,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Set
 
+from .data_division import expand_pic, parse_pic
 from .model import Action, Program, walk_statements
 from .textutil import split_outside_literals
 
@@ -40,6 +41,40 @@ _SOURCE_NAME = re.compile(
     r"^([A-Z0-9][A-Z0-9-]*)(?:\s+(?:OF|IN)\s+[A-Z0-9][A-Z0-9-]*)*$", re.I)
 # Runs for every MOVE / SET in the program - compiled once, like its neighbours.
 _SPLIT_OPERANDS = re.compile(r"[\s,]+")
+# No program name, CICS PROGRAM() operand or load module name contains a blank, and a
+# `*` or `?` makes the literal a placeholder or a wildcard template, not a name.
+_NOT_A_NAME = re.compile(r"[\s*?]")
+# PICTURE categories whose character positions are the item's length in characters.
+_CHARACTER_ITEMS = ("alphanumeric", "alphanumeric-edited", "alphabetic")
+
+
+def _is_filler(literal: str) -> bool:
+    """`ZZZZZZZZ`, `XXXXXXXX`, `99999999` - a fill pattern, never a load module name.
+
+    Four is the shortest run worth treating this way: `ZZ` and `XXX` are plausible
+    prefixes of a real 8-character member name, `ZZZZ` is not.
+    """
+    return len(literal) >= 4 and len(set(literal)) == 1
+
+
+def _not_a_name(literal: str) -> Optional[str]:
+    """Why ``literal`` cannot be a program or resource name, or None if it can."""
+    if not literal or re.search(r"\s", literal):
+        return "space"                  # an all-blank literal is SPACES by another name
+    if _NOT_A_NAME.search(literal):
+        return "wildcard"
+    if _is_filler(literal):
+        return "filler"                 # an initialiser the program overwrites
+    return None
+
+
+def _character_length(item) -> Optional[int]:
+    """The length in characters of an elementary character item, else None."""
+    pic = str(getattr(item, "pic", None) or "").strip().rstrip(".")
+    if not pic or parse_pic(pic, getattr(item, "usage", None)).category \
+            not in _CHARACTER_ITEMS:
+        return None
+    return len(expand_pic(pic))
 
 
 @dataclass
@@ -57,6 +92,10 @@ class CallResolution:
     # confidence as one the program demonstrably moves, which is an overclaim: the first
     # is what the program was WRITTEN to allow, the second is what it DOES.
     evidence: Optional[str] = None
+    # Literals that reach the item but cannot be the name the call invokes, each as
+    # {"literal", "reason"} with reason length | space | wildcard | filler. Kept rather
+    # than dropped, so "no admissible literal" never reads as "no literal at all".
+    rejected: List[Dict[str, str]] = field(default_factory=list)
 
 
 @dataclass
@@ -78,6 +117,38 @@ class CallAnalysis:
     # assignment reaches the item at all, these are still the values the program was
     # WRITTEN to put there (via SET ... TO TRUE) - reported as candidates, not proof.
     condition_literals: Dict[str, List[str]] = field(default_factory=dict)
+    # item -> its length in characters, when every declaration of it fixes one. What
+    # the item cannot hold, the call cannot invoke.
+    receiver_sizes: Dict[str, int] = field(default_factory=dict)
+
+    def _admit(self, name: str, literals, operand_limit: Optional[int]):
+        """(names, rejected, truncated): which literals can be what the call invokes.
+
+        The item's own declaration bounds what it holds (``receiver_sizes``) - a
+        literal longer than that is not its value. ``operand_limit`` is the verb's own
+        bound - 8 for a CICS PROGRAM() operand - and CICS passes exactly that many
+        characters, so a literal longer than the bound but short enough for the item is
+        truncated, not discarded: `ABC40001C` in a PIC X(9) is a LINK to ABC40001.
+        """
+        names: Set[str] = set()
+        rejected: List[Dict[str, str]] = []
+        truncated: Dict[str, str] = {}
+        size = self.receiver_sizes.get(name)
+        for lit in sorted(set(literals)):
+            passed = lit
+            if operand_limit is not None and len(lit.rstrip()) > operand_limit:
+                passed = lit[:operand_limit].rstrip()
+            # Longer than the item is judged on the literal - the item cannot hold it.
+            # The rest on what the verb actually passes. Trailing blanks are padding.
+            why = ("length" if size is not None and len(lit.rstrip()) > size
+                   else _not_a_name(passed.rstrip()))
+            if why:
+                rejected.append({"literal": lit, "reason": why})
+                continue
+            if passed != lit:
+                truncated[lit] = passed
+            names.add(passed)
+        return names, rejected, truncated
 
     def _reaching(self, name: str):
         """(literals, opaque, through) for ``name``, following assignment chains.
@@ -115,37 +186,68 @@ class CallAnalysis:
                     queue.append(m.group(1).upper())
         return lits, opaque, through
 
-    def resolve(self, name: str) -> CallResolution:
+    def resolve(self, name: str, operand_limit: Optional[int] = None) -> CallResolution:
+        """What the call naming item ``name`` invokes.
+
+        A literal that cannot be a name - see ``_admit`` - is never offered as a
+        candidate, and never promotes one either: a call that a rejected literal also
+        reaches stays flagged, however many admissible names remain.
+        """
         name = name.upper()
         reached, opaque, through = self._reaching(name)
-        lits = sorted(reached)
+        admitted, rejected, truncated = self._admit(name, reached, operand_limit)
+        lits = sorted(admitted)
         var = name in self.var_assigns
         # Named only when the chain was actually walked, so the message for a directly
         # assigned name is the one it has always been.
         path = f" (through {', '.join(through)})" if through else ""
-        if len(lits) == 1 and not opaque:
+        c88, rejected88, truncated88 = self._admit(
+            name, self.condition_literals.get(name, []), operand_limit)
+        if not lits and not var:
+            rejected += rejected88
+            truncated.update(truncated88)
+        # Empty unless the filter acted, so no other message changes.
+        note = ""
+        if truncated:
+            note += (f"; the operand passes {operand_limit} characters: "
+                     + ", ".join(f"'{a}' -> '{b}'" for a, b in sorted(truncated.items())))
+        if rejected:
+            note += "; not a name: " + ", ".join(
+                f"'{r['literal']}' ({r['reason']})" for r in rejected)
+        if len(lits) == 1 and not opaque and not rejected:
+            reaching = "name" if truncated else "literal"   # two literals may truncate to one
             return CallResolution(True, lits[0], lits, False,
-                                  f"only literal reaching {name} is '{lits[0]}'" + path,
-                                  evidence="assigned")
+                                  f"only {reaching} reaching {name} is '{lits[0]}'" + path
+                                  + note, evidence="assigned")
         if lits and not opaque:
             return CallResolution(False, None, lits, False,
                                   f"{name} may be one of {lits}; verify reaching definition"
-                                  + path,
-                                  evidence="assigned")
+                                  + path + note,
+                                  evidence="assigned", rejected=rejected)
         if lits and opaque:
             return CallResolution(False, None, lits, True,
-                                  f"{name} set to {lits} and also to a variable; runtime-determined",
-                                  evidence="assigned")
+                                  f"{name} set to {lits} and also to a variable; runtime-determined"
+                                  + note,
+                                  evidence="assigned", rejected=rejected)
         if var:
             return CallResolution(False, None, [], True,
-                                  f"{name} set only from variables; target runtime-determined")
-        c88 = sorted(set(self.condition_literals.get(name, [])))
+                                  (f"{name} set from variables and from no literal that "
+                                   f"can be a name" if rejected else
+                                   f"{name} set only from variables")
+                                  + "; target runtime-determined" + note,
+                                  rejected=rejected)
+        c88 = sorted(c88)
         if c88:
             return CallResolution(False, None, c88, False,
                                   f"{name} carries 88-level condition value(s) {c88} "
                                   f"but no SET ... TO TRUE or MOVE in the visible "
-                                  f"source proves which reaches; verify",
-                                  evidence="declared-88")
+                                  f"source proves which reaches; verify" + note,
+                                  evidence="declared-88", rejected=rejected)
+        if rejected:
+            return CallResolution(False, None, [], False,
+                                  f"no literal that can be a name reaches {name}; "
+                                  f"target runtime-determined" + note,
+                                  rejected=rejected)
         if name not in self.declared:
             hint = (f" - likely defined (with its VALUE) in a missing copybook "
                     f"({', '.join(self.missing_copybooks)})"
@@ -169,10 +271,18 @@ def analyze_calls(program: Program) -> CallAnalysis:
     # working_values, where the last does - keeps both literals of a name declared twice
     # with different values. Collapsed to one, `CALL WS-PGM OF GRP-A` resolved confidently
     # to GRP-B's literal; kept as two, it stays a flagged candidate list.
+    # The same walk sizes each item: its length in characters when EVERY declaration of
+    # the name fixes one (the longest of them), else nothing - a name declared once as a
+    # group, or undeclared, is never grounds to reject a literal.
+    sizes: Dict[str, Optional[int]] = {}
     for item in program.data_items:
         val = str(getattr(item, "value", None) or "")
         if len(val) >= 2 and val[0] == val[-1] and val[0] in ("'", '"'):
             literal_assigns.setdefault(str(item.name).upper(), set()).add(val[1:-1].rstrip())
+        if getattr(item, "level", None) != 88:
+            key, size = str(item.name).upper(), _character_length(item)
+            sizes[key] = (None if size is None or (key in sizes and sizes[key] is None)
+                          else max(size, sizes.get(key) or 0))
 
     # 88-level condition names with string VALUEs: `SET <cond> TO TRUE` stores the
     # condition's (first) VALUE into its parent item - a literal-assignment channel on
@@ -229,4 +339,5 @@ def analyze_calls(program: Program) -> CallAnalysis:
                if cb.get("status") == "missing"]
     return CallAnalysis(literal_assigns=literal_assigns, var_assigns=var_assigns,
                         declared=declared, missing_copybooks=missing,
-                        condition_literals=cond_values)
+                        condition_literals=cond_values,
+                        receiver_sizes={k: v for k, v in sizes.items() if v is not None})

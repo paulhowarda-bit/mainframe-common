@@ -316,3 +316,32 @@ def test_v5_records_which_form_of_for_a_cursor_declare_used(tmp_path):
     assert old.paragraphs[0].statements[0].cursor_for_kind is None
     assert old.paragraphs[0].statements[0].cursor_for_statement is None
     assert "forKind" not in old.sql_cursors[0]
+
+
+def test_v7_carries_the_fd_data_record_clause_and_v6_bundles_still_open(tmp_path):
+    """VERSION 7 added `Program.fd_data_records`. A v6 bundle never read the clause, so
+    it opens with the empty default - which a reader must take as "not read", the same
+    rule the v5 cursor fields follow."""
+    src = (
+        "       IDENTIFICATION DIVISION.\n"
+        "       PROGRAM-ID. TFD.\n"
+        "       DATA DIVISION.\n"
+        "       FILE SECTION.\n"
+        "       FD  OUT-FILE\n"
+        "           DATA RECORD IS OUT-REC.\n"
+        "       01  OUT-REC PIC X(80).\n"
+        "       PROCEDURE DIVISION.\n"
+        "           GOBACK.\n"
+    )
+    prog = parse_program(src)
+    assert prog.fd_data_records == {"OUT-FILE": ["OUT-REC"]}
+    assert _roundtrip(prog).fd_data_records == {"OUT-FILE": ["OUT-REC"]}
+
+    out = tmp_path / "v6.parse.json"
+    write_parse_bundle(out, source_name="v.cbl", source_text=src,
+                       fmt=SourceFormat.FIXED, program=prog)
+    doc = json.loads(out.read_text(encoding="utf-8"))
+    doc["version"] = 6
+    doc["program"].pop("fd_data_records")
+    out.write_text(json.dumps(doc), encoding="utf-8")
+    assert open_parse_bundle(out).program().fd_data_records == {}

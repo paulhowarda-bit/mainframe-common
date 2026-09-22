@@ -65,7 +65,9 @@ FORMAT = "cobol-parser"
 #      could not be made, beside the prose already in `column_note`. Absent (a v<=5
 #      bundle) means the producer had no token to give, NOT that the statement
 #      correlated - `column_note` is still the thing that says whether it failed.
-VERSION = 6
+#   7  Program.fd_data_records: the record names each FD/SD's DATA RECORD clause lists.
+#      Absent (a v<=6 bundle) means the clause was never read, NOT that no FD has one.
+VERSION = 7
 #: The producer name this package writes. An external producer (a different parser
 #: emitting the same contract) writes its own, so a reader can tell whose parse it is.
 PRODUCER = "cobol-parser-python"

@@ -1242,3 +1242,53 @@ def test_a_set_from_current_timestamp_still_says_nothing():
     st = prog.paragraphs[0].statements[0]
     assert st.columns == [] and st.column_note is None
     assert st.column_unresolved is None
+
+
+# --------------------------------------------------------------------------- #
+# The FD/SD entry: its own clauses, and the records it says are its
+# --------------------------------------------------------------------------- #
+
+_FD_SRC = (
+    "       IDENTIFICATION DIVISION.\n"
+    "       PROGRAM-ID. FDREC.\n"
+    "       ENVIRONMENT DIVISION.\n"
+    "       INPUT-OUTPUT SECTION.\n"
+    "       FILE-CONTROL.\n"
+    "           SELECT A-FILE ASSIGN TO DDA.\n"
+    "           SELECT B-FILE ASSIGN TO DDB.\n"
+    "           SELECT C-FILE ASSIGN TO DDC.\n"
+    "       DATA DIVISION.\n"
+    "       FILE SECTION.\n"
+    "       FD  A-FILE.\n"
+    "       01  A-REC.\n"
+    "           05 A-KEY  PIC X(8).\n"
+    "           05 A-REST PIC X(72).\n"
+    "       FD  B-FILE\n"
+    "           RECORDING MODE IS F\n"
+    "           VALUE OF FILE-ID IS 'B.DAT'\n"
+    "           DATA RECORDS ARE B-REC-1, B-REC-2.\n"
+    "       01  B-REC-1 PIC X(80).\n"
+    "       01  B-REC-2 PIC X(80).\n"
+    "       FD  C-FILE DATA RECORD C-REC LABEL RECORDS ARE STANDARD.\n"
+    "       01  C-REC PIC X(80).\n"
+    "       WORKING-STORAGE SECTION.\n"
+    "       01  WS-X PIC X.\n"
+    "       PROCEDURE DIVISION.\n"
+    "           GOBACK.\n"
+)
+
+
+def test_the_data_record_clause_names_the_fds_records():
+    """`DATA RECORD IS` / `DATA RECORDS ARE` (IS/ARE optional, commas allowed), on the
+    FD line or a later one; the list ends where the FD's next clause begins."""
+    assert parse_program(_FD_SRC).fd_data_records == {
+        "B-FILE": ["B-REC-1", "B-REC-2"], "C-FILE": ["C-REC"]}
+
+
+def test_an_fds_clause_lines_do_not_join_the_item_above_it():
+    """The FD's continuation lines used to be appended to the last entry of the
+    previous record, so `VALUE OF FILE-ID IS 'B.DAT'` gave A-REST the VALUE `OF`."""
+    items = {i.name: i for i in parse_program(_FD_SRC).data_items}
+    assert items["A-REST"].value is None and items["A-REST"].pic == "X(72)"
+    assert [i.file for i in items.values() if i.name != "WS-X"] == \
+        ["A-FILE"] * 3 + ["B-FILE"] * 2 + ["C-FILE"]
