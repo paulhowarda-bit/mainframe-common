@@ -482,13 +482,18 @@ def _scan_sql_declarations(lines) -> Tuple[List[dict], List[dict]]:
 
 
 # Words that can legally follow FROM and are NOT the table: a data-change table
-# reference (`FROM FINAL TABLE (INSERT ...)`, and its OLD/NEW forms) and a table
-# function (`FROM TABLE (f(...))`). Taking one of these as the table name mints a
+# reference's keyword (`FROM FINAL TABLE (INSERT ...)`, and its OLD/NEW forms) and a
+# table function (`FROM TABLE (f(...))`). Taking one of these as the table name mints a
 # shared anchor identity for a KEYWORD, which is worse than admitting the name is
 # unknown - a consumer can handle "unknown", but not a table called FINAL, which
-# two programs would then MERGE onto as if it were the same one.
-_NOT_A_TABLE = frozenset({"FINAL", "OLD", "NEW", "TABLE", "XMLTABLE", "LATERAL",
-                          "UNNEST", "SELECT"})
+# two programs would then MERGE onto as if it were the same one. FINAL / OLD / NEW
+# are not listed: followed by `TABLE (` they name the inner statement's target
+# (`_table_name`), and otherwise they ARE the table's name.
+_NOT_A_TABLE = frozenset({"TABLE", "XMLTABLE", "LATERAL", "UNNEST", "SELECT"})
+_DATA_CHANGE = frozenset({"FINAL", "OLD", "NEW"})
+# The data-change statement's verb -> the word between it and its target, if any.
+_DATA_CHANGE_VERBS = {"INSERT": "INTO", "UPDATE": None, "DELETE": "FROM",
+                      "MERGE": "INTO"}
 
 
 def _declare_from_table(block: List[Token]) -> Optional[str]:
@@ -1932,6 +1937,17 @@ class StmtParser:
         continues it - two adjacent words (`T WHERE ...`) are a name and the next
         clause, not one long name."""
         if not item or item[0].kind != "word":
+            return None
+        if (item[0].up in _DATA_CHANGE and len(item) > 2 and item[1].up == "TABLE"
+                and item[2].kind == "punct" and item[2].text == "("):
+            # `FINAL TABLE (UPDATE t ...)`: the table is the inner statement's target.
+            # Only with `TABLE (` behind it - a table may genuinely be called FINAL.
+            for k in range(3, len(item) - 1):
+                if item[k].kind == "word" and item[k].up in _DATA_CHANGE_VERBS:
+                    rest = item[k + 1:]
+                    if rest and rest[0].up == _DATA_CHANGE_VERBS[item[k].up]:
+                        rest = rest[1:]
+                    return StmtParser._table_name(rest)
             return None
         if item[0].up in _NOT_A_TABLE:
             return None

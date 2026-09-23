@@ -152,6 +152,7 @@ _REPLACE_START = re.compile(r"\s*REPLACE\b", re.I)
 _REPLACE_OFF = re.compile(r"\bREPLACE\s+(?:OFF|LAST\s+OFF)\b", re.I)
 _REPLACE_HEAD = re.compile(r"^\s*REPLACE\b", re.I)
 _SQL_INCLUDE_PROBE = re.compile(r"\bEXEC\s+SQL\s+INCLUDE\b", re.I)
+_EXEC_SQL_PROBE = re.compile(r"\bEXEC\s+SQL\b", re.I)
 
 
 def _parse_replacing(clause: str) -> List[Tuple[str, str]]:
@@ -223,6 +224,38 @@ def _gather_statement(lines: List[CodeLine], i: int):
     return " ".join(parts), j + 1
 
 
+def _copy_statement(lines: List[CodeLine], i: int):
+    """The COPY / EXEC SQL INCLUDE statement that starts on line i, as
+    (stmt, match, is_copy, next_i), else None - the one gate both
+    :func:`scan_copy_members` and :func:`preprocess` use, so they cannot disagree.
+
+    The common form (COPY, or all of ``EXEC SQL INCLUDE`` on one line) is tested first.
+    The second branch is the split form an estate writes routinely::
+
+        EXEC SQL
+            INCLUDE DCLACCT
+        END-EXEC.
+
+    where neither line carries all three tokens, so the member used to be neither
+    fetched nor expanded. Any line with ``EXEC SQL`` is gathered speculatively, but
+    only an INCLUDE whose ``EXEC SQL`` is on THIS line is taken: an embedded statement
+    without a period (routine inside IF) gathers up to the next period, and a match
+    further down belongs to that later line, which gets its own turn - taking it here
+    would fold the lines in between into one."""
+    up = lines[i].text.upper()
+    if "COPY" in up or ("INCLUDE" in up and _SQL_INCLUDE_PROBE.search(up)):
+        stmt, nxt = _gather_statement(lines, i)
+        copy_m = _COPY_RE.search(stmt)
+        m = copy_m or _SQL_INCLUDE_RE.search(stmt)
+        return (stmt, m, bool(copy_m), nxt) if m else None
+    if "EXEC" in up and _EXEC_SQL_PROBE.search(up):
+        stmt, nxt = _gather_statement(lines, i)
+        m = _SQL_INCLUDE_RE.search(stmt)
+        if m and m.start() < len(lines[i].text):
+            return stmt, m, False, nxt
+    return None
+
+
 def scan_copy_members(text: str, fmt: Optional[SourceFormat] = None) -> List[str]:
     """Every member a ``COPY`` / ``EXEC SQL INCLUDE`` in ``text`` names, uppercased and
     de-duplicated, in source order.
@@ -241,17 +274,15 @@ def scan_copy_members(text: str, fmt: Optional[SourceFormat] = None) -> List[str
     seen: set = set()
     i = 0
     while i < len(lines):
-        up = lines[i].text.upper()
-        if "COPY" in up or ("INCLUDE" in up and _SQL_INCLUDE_PROBE.search(up)):
-            stmt, nxt = _gather_statement(lines, i)
-            m = _COPY_RE.search(stmt) or _SQL_INCLUDE_RE.search(stmt)
-            if m:
-                member = m.group(1).strip().strip("'\"").upper()
-                if member and member not in seen:
-                    seen.add(member)
-                    found.append(member)
-                i = nxt
-                continue
+        hit = _copy_statement(lines, i)
+        if hit:
+            _, m, _, nxt = hit
+            member = m.group(1).strip().strip("'\"").upper()
+            if member and member not in seen:
+                seen.add(member)
+                found.append(member)
+            i = nxt
+            continue
         i += 1
     return found
 
@@ -297,27 +328,23 @@ def preprocess(lines: List[CodeLine], resolver: Optional[CopybookResolver] = Non
                 active_replace = prs
                 i = nxt
                 continue
-        # "INCLUDE" gates the second (expensive) probe: without it the regex ran on
-        # essentially every line of every program, since `COPY` short-circuits rarely.
-        if "COPY" in up or ("INCLUDE" in up and _SQL_INCLUDE_PROBE.search(up)):
-            stmt, nxt = _gather_statement(lines, i)
-            copy_m = _COPY_RE.search(stmt)
-            m = copy_m or _SQL_INCLUDE_RE.search(stmt)
-            if m:
-                # Code preceding the COPY in the same gathered sentence (e.g.
-                # ``MOVE 1 TO WS-IDX. COPY FOO.``) is real code - keep it.
-                prefix = stmt[:m.start()].strip()
-                if prefix:
-                    emit(CodeLine(text=prefix, line=line.line,
-                                  area_a=line.area_a, origin=line.origin))
-                member = m.group(1)
-                rep = m.groupdict().get("rep") if copy_m else None
-                pairs = _parse_replacing(rep or "")
-                _expand_member(member, pairs + active_replace, resolver, res, _seen, fmt,
-                               via="COPY" if copy_m else "EXEC SQL INCLUDE",
-                               replacing=bool(rep), source_line=line.line)
-                i = nxt
-                continue
+        hit = _copy_statement(lines, i)
+        if hit:
+            stmt, m, is_copy, nxt = hit
+            # Code preceding the COPY in the same gathered sentence (e.g.
+            # ``MOVE 1 TO WS-IDX. COPY FOO.``) is real code - keep it.
+            prefix = stmt[:m.start()].strip()
+            if prefix:
+                emit(CodeLine(text=prefix, line=line.line,
+                              area_a=line.area_a, origin=line.origin))
+            member = m.group(1)
+            rep = m.groupdict().get("rep") if is_copy else None
+            pairs = _parse_replacing(rep or "")
+            _expand_member(member, pairs + active_replace, resolver, res, _seen, fmt,
+                           via="COPY" if is_copy else "EXEC SQL INCLUDE",
+                           replacing=bool(rep), source_line=line.line)
+            i = nxt
+            continue
         emit(line)
         i += 1
     return res

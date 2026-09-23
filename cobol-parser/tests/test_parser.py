@@ -1124,7 +1124,8 @@ def test_an_unparseable_values_list_publishes_its_own_token():
 
 def test_a_data_change_table_reference_is_not_a_table_named_final():
     """FINAL is a keyword here. Minting a table identity for it is worse than
-    admitting the name is unknown: two programs would MERGE onto the same anchor."""
+    admitting the name is unknown: two programs would MERGE onto the same anchor.
+    Since batch-21 item 53 the name is not unknown either: it is the inner INSERT's."""
     prog = parse_program(_wrap(
         "       0000-MAIN.\n"
         "           EXEC SQL DECLARE CSR1 CURSOR FOR\n"
@@ -1132,7 +1133,7 @@ def test_a_data_change_table_reference_is_not_a_table_named_final():
         "           END-EXEC.\n"
         "           STOP RUN.\n"
     ))
-    assert prog.sql_cursors[0]["table"] is None
+    assert prog.sql_cursors[0]["table"] == "T"
 
 
 def test_a_table_function_is_not_a_table_named_table():
@@ -1292,3 +1293,93 @@ def test_an_fds_clause_lines_do_not_join_the_item_above_it():
     assert items["A-REST"].value is None and items["A-REST"].pic == "X(72)"
     assert [i.file for i in items.values() if i.name != "WS-X"] == \
         ["A-FILE"] * 3 + ["B-FILE"] * 2 + ["C-FILE"]
+
+
+# --- batch-21 item 52: an EXEC SQL INCLUDE split across lines ---------------------
+
+def _members(body: str):
+    from cobol_parser.preprocessor import scan_copy_members
+    return scan_copy_members(
+        "       IDENTIFICATION DIVISION.\n       PROGRAM-ID. T.\n"
+        "       DATA DIVISION.\n       WORKING-STORAGE SECTION.\n" + body)
+
+
+def _expanded(body: str):
+    from cobol_parser.normalizer import normalize
+    from cobol_parser.preprocessor import preprocess
+    res = preprocess(normalize(
+        "       IDENTIFICATION DIVISION.\n       PROGRAM-ID. T.\n"
+        "       DATA DIVISION.\n       WORKING-STORAGE SECTION.\n" + body))
+    return res
+
+
+def test_an_sql_include_is_found_on_one_line_and_split_across_three():
+    """All three tokens used to be required on ONE physical line, so the estate's
+    usual layout - EXEC SQL / INCLUDE m / END-EXEC. - was never fetched or expanded."""
+    assert _members("           EXEC SQL INCLUDE ONE END-EXEC.\n") == ["ONE"]
+    split = ("           EXEC SQL\n"
+             "               INCLUDE DCLACCT\n"
+             "           END-EXEC.\n")
+    assert _members(split) == ["DCLACCT"]
+    rows = _expanded(split).copybooks
+    assert [(r["member"], r["via"]) for r in rows] == [("DCLACCT", "EXEC SQL INCLUDE")]
+
+
+def test_a_split_sql_include_with_a_change_tag_in_columns_1_to_6_is_found():
+    """A fixed-format test without the tag would pass while real source failed."""
+    assert _members("CH0042     EXEC SQL\n"
+                    "CH0042         INCLUDE DCLACCT\n"
+                    "CH0042     END-EXEC.\n") == ["DCLACCT"]
+
+
+def test_an_ordinary_sql_statement_names_no_member_and_is_not_consumed():
+    body = ("           EXEC SQL\n"
+            "               SELECT A INTO :B FROM T\n"
+            "           END-EXEC.\n")
+    assert _members(body) == []
+    res = _expanded(body)
+    assert res.copybooks == []
+    assert [cl.text.strip() for cl in res.lines][-3:] == [
+        "EXEC SQL", "SELECT A INTO :B FROM T", "END-EXEC."]
+
+
+def test_a_later_include_does_not_fold_an_open_sql_statement_into_one_line():
+    """An embedded statement with no period gathers up to the next one. The INCLUDE
+    found at the end of that run belongs to ITS own line, so the lines before it must
+    come through untouched rather than being joined as a prefix."""
+    body = ("           EXEC SQL\n"
+            "               DECLARE C1 CURSOR FOR SELECT A FROM T\n"
+            "           END-EXEC\n"
+            "           EXEC SQL INCLUDE ONE END-EXEC.\n")
+    assert _members(body) == ["ONE"]
+    res = _expanded(body)
+    assert [r["member"] for r in res.copybooks] == ["ONE"]
+    assert [cl.text.strip() for cl in res.lines][-3:] == [
+        "EXEC SQL", "DECLARE C1 CURSOR FOR SELECT A FROM T", "END-EXEC"]
+
+
+# --- batch-21 item 53: a data-change table reference names the inner table ---------
+
+def _cursor_table(select: str):
+    prog = parse_program(
+        "       IDENTIFICATION DIVISION.\n       PROGRAM-ID. T.\n"
+        "       DATA DIVISION.\n       WORKING-STORAGE SECTION.\n"
+        "       01  WS-ID PIC 9(5).\n"
+        "           EXEC SQL DECLARE C1 CURSOR FOR\n"
+        f"               {select}\n"
+        "           END-EXEC.\n"
+        "       PROCEDURE DIVISION.\n           GOBACK.\n")
+    return prog.sql_cursors[0]["table"]
+
+
+def test_a_data_change_reference_names_its_inner_table_for_every_keyword():
+    assert _cursor_table("SELECT ID FROM FINAL TABLE (UPDATE S.T1 SET A = 1)") == "S.T1"
+    assert _cursor_table("SELECT ID FROM OLD TABLE (DELETE FROM T2 WHERE ID = 1)") == "T2"
+    assert _cursor_table(
+        "SELECT ID FROM NEW TABLE (INSERT INTO T3 (ID) VALUES (:WS-ID))") == "T3"
+
+
+def test_a_table_genuinely_called_final_is_still_its_name():
+    """Not a keyword blocklist: without `TABLE (` behind it, FINAL is the table."""
+    assert _cursor_table("SELECT ID FROM FINAL WHERE ID = 1") == "FINAL"
+    assert _cursor_table("SELECT ID FROM NEW") == "NEW"
