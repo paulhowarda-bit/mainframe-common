@@ -345,3 +345,34 @@ def test_v7_carries_the_fd_data_record_clause_and_v6_bundles_still_open(tmp_path
     doc["program"].pop("fd_data_records")
     out.write_text(json.dumps(doc), encoding="utf-8")
     assert open_parse_bundle(out).program().fd_data_records == {}
+
+
+def test_v8_carries_a_cursors_data_change_and_v7_bundles_still_open(tmp_path):
+    """VERSION 8 added the `dataChange` key on `Program.sql_cursors`. A v7 bundle
+    never recorded it, so its cursors open without the key - UNKNOWN, and the OPEN of
+    such a cursor publishes no write, exactly as before the key existed."""
+    src = (
+        "       IDENTIFICATION DIVISION.\n"
+        "       PROGRAM-ID. TDC.\n"
+        "       DATA DIVISION.\n"
+        "       WORKING-STORAGE SECTION.\n"
+        "       01  WS-ID PIC 9(5).\n"
+        "           EXEC SQL DECLARE C1 CURSOR FOR SELECT ID FROM FINAL TABLE\n"
+        "             (INSERT INTO T (ID) VALUES (:WS-ID)) END-EXEC.\n"
+        "       PROCEDURE DIVISION.\n"
+        "           GOBACK.\n"
+    )
+    prog = parse_program(src)
+    want = {"verb": "INSERT", "hostVars": ["WS-ID"]}
+    assert prog.sql_cursors[0]["dataChange"] == want
+    assert _roundtrip(prog).sql_cursors[0]["dataChange"] == want
+
+    out = tmp_path / "v7.parse.json"
+    write_parse_bundle(out, source_name="v.cbl", source_text=src,
+                       fmt=SourceFormat.FIXED, program=prog)
+    doc = json.loads(out.read_text(encoding="utf-8"))
+    doc["version"] = 7
+    for c in doc["program"]["sql_cursors"]:
+        c.pop("dataChange", None)
+    out.write_text(json.dumps(doc), encoding="utf-8")
+    assert "dataChange" not in open_parse_bundle(out).program().sql_cursors[0]

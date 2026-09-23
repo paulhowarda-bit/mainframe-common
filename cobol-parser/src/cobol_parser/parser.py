@@ -468,11 +468,15 @@ def _scan_sql_declarations(lines) -> Tuple[List[dict], List[dict]]:
         if cursor:
             select_list, derivations, _note =                 StmtParser._exec_select_columns(block)
             for_kind, for_stmt = StmtParser._exec_declare_for(block)
-            cursors.append({"cursor": cursor, "selectList": select_list,
-                            "selectDerivations": derivations,
-                            "table": _declare_from_table(block),
-                            "forKind": for_kind, "forStatement": for_stmt,
-                            "line": head.line, "member": head.origin})
+            row = {"cursor": cursor, "selectList": select_list,
+                   "selectDerivations": derivations,
+                   "table": _declare_from_table(block),
+                   "forKind": for_kind, "forStatement": for_stmt,
+                   "line": head.line, "member": head.origin}
+            change = _declare_data_change(block)
+            if change:
+                row["dataChange"] = change
+            cursors.append(row)
             continue
         entry = _declare_table_columns(block)
         if entry:
@@ -507,6 +511,31 @@ def _declare_from_table(block: List[Token]) -> Optional[str]:
             depth -= 1
         elif depth == 0 and t.kind == "word" and t.up == "FROM":
             return StmtParser._table_name(block[i + 1:])
+    return None
+
+
+def _declare_data_change(block: List[Token]) -> Optional[dict]:
+    """A cursor over a data-change table reference - `SELECT ... FROM FINAL TABLE
+    (INSERT INTO t ...)` - as {verb, hostVars}, else None.
+
+    Such a cursor WRITES: Db2 runs the inner statement when the cursor is OPENed, and
+    the FETCHes only read back what it produced. The table is already the cursor's
+    `table` (`_table_name` reads through the head); this is what the OPEN needs on top
+    of it - which write, and the host variables that feed it."""
+    depth = 0
+    for i, t in enumerate(block):
+        if t.kind == "punct" and t.text == "(":
+            depth += 1
+        elif t.kind == "punct" and t.text == ")":
+            depth -= 1
+        elif depth == 0 and t.kind == "word" and t.up == "FROM":
+            rest = block[i + 1:]
+            if not (len(rest) > 3 and rest[0].up in _DATA_CHANGE
+                    and rest[1].up == "TABLE" and rest[2].kind == "punct"
+                    and rest[2].text == "(" and rest[3].up in _DATA_CHANGE_VERBS):
+                return None
+            inner = StmtParser._paren_group(block, i + 3) or []
+            return {"verb": rest[3].up, "hostVars": StmtParser._host_vars_in(inner)}
     return None
 
 

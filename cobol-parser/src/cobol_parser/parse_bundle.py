@@ -67,7 +67,10 @@ FORMAT = "cobol-parser"
 #      correlated - `column_note` is still the thing that says whether it failed.
 #   7  Program.fd_data_records: the record names each FD/SD's DATA RECORD clause lists.
 #      Absent (a v<=6 bundle) means the clause was never read, NOT that no FD has one.
-VERSION = 7
+#   8  the dataChange key on Program.sql_cursors: {verb, hostVars} for a cursor over a
+#      data-change table reference, whose OPEN writes the table. Absent on a v<=7
+#      bundle means UNKNOWN - that cursor's OPEN publishes no write, as it did before.
+VERSION = 8
 #: The producer name this package writes. An external producer (a different parser
 #: emitting the same contract) writes its own, so a reader can tell whose parse it is.
 PRODUCER = "cobol-parser-python"

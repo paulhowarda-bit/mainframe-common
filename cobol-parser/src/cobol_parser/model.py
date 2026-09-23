@@ -323,7 +323,9 @@ class Program:
     # WORKING-STORAGE (the common case: a DCLGEN-adjacent copybook) was invisible to
     # FETCH correlation, and every FETCH on it lost its column identity.
     #   sql_cursors:     [{cursor, selectList, selectDerivations, table, forKind,
-    #                     forStatement, line, member}]
+    #                     forStatement, line, member[, dataChange]}]
+    #                    dataChange: {verb, hostVars}, only on a cursor over a
+    #                    data-change table reference (`FROM FINAL TABLE (INSERT ...)`)
     #   declared_tables: [{table, columns, line, member}]  (DECLARE TABLE / DCLGEN)
     sql_cursors: List[dict] = field(default_factory=list)
     declared_tables: List[dict] = field(default_factory=list)

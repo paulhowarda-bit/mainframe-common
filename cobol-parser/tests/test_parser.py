@@ -1383,3 +1383,31 @@ def test_a_table_genuinely_called_final_is_still_its_name():
     """Not a keyword blocklist: without `TABLE (` behind it, FINAL is the table."""
     assert _cursor_table("SELECT ID FROM FINAL WHERE ID = 1") == "FINAL"
     assert _cursor_table("SELECT ID FROM NEW") == "NEW"
+
+
+def _cursor_row(select: str) -> dict:
+    return parse_program(
+        "       IDENTIFICATION DIVISION.\n       PROGRAM-ID. T.\n"
+        "       DATA DIVISION.\n       WORKING-STORAGE SECTION.\n"
+        "       01  WS-ID PIC 9(5).\n"
+        "           EXEC SQL DECLARE C1 CURSOR FOR\n"
+        f"           {select}\n"
+        "           END-EXEC.\n"
+        "       PROCEDURE DIVISION.\n           GOBACK.\n").sql_cursors[0]
+
+
+def test_a_cursor_over_a_data_change_reference_records_the_write_its_open_runs():
+    """Db2 runs the inner statement at OPEN, so the cursor record carries which write
+    and the host variables that feed it - the table is already `table`."""
+    # Kept short of column 72: fixed format drops whatever lies past it.
+    row = _cursor_row("SELECT ID FROM FINAL TABLE (INSERT INTO T3 VALUES (:WS-ID))")
+    assert row["table"] == "T3"
+    assert row["dataChange"] == {"verb": "INSERT", "hostVars": ["WS-ID"]}
+    assert _cursor_row("SELECT ID FROM OLD TABLE (DELETE FROM T2 WHERE A=:WS-ID)"
+                       )["dataChange"] == {"verb": "DELETE", "hostVars": ["WS-ID"]}
+
+
+def test_an_ordinary_cursor_carries_no_data_change_key():
+    """Only the data-change form gets the key, so no existing parse output moves."""
+    assert "dataChange" not in _cursor_row("SELECT ID FROM T WHERE ID = :WS-ID")
+    assert "dataChange" not in _cursor_row("SELECT ID FROM FINAL WHERE ID = :WS-ID")
