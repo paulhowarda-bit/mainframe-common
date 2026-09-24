@@ -376,3 +376,44 @@ def test_v8_carries_a_cursors_data_change_and_v7_bundles_still_open(tmp_path):
         c.pop("dataChange", None)
     out.write_text(json.dumps(doc), encoding="utf-8")
     assert "dataChange" not in open_parse_bundle(out).program().sql_cursors[0]
+
+
+def test_v9_contained_programs_round_trip_and_v8_bundles_still_open(tmp_path):
+    """VERSION 9 carries each contained program parsed. Each unit goes through the same
+    Program encoding as the main one, so its data_by_name still points into its OWN
+    data_items after the round trip; a v8 bundle (no field) opens with none."""
+    src = (
+        "       IDENTIFICATION DIVISION.\n"
+        "       PROGRAM-ID. OUTERPGM.\n"
+        "       PROCEDURE DIVISION.\n"
+        "       0000-MAIN.\n"
+        "           CALL 'INNERPGM'\n"
+        "           GOBACK.\n"
+        "       IDENTIFICATION DIVISION.\n"
+        "       PROGRAM-ID. INNERPGM.\n"
+        "       DATA DIVISION.\n"
+        "       WORKING-STORAGE SECTION.\n"
+        "       01  WS-TARGET PIC X(8) VALUE 'EXTMOD'.\n"
+        "       PROCEDURE DIVISION.\n"
+        "       1000-INNER.\n"
+        "           CALL WS-TARGET\n"
+        "           GOBACK.\n"
+        "       END PROGRAM INNERPGM.\n"
+        "       END PROGRAM OUTERPGM.\n"
+    )
+    prog = parse_program(src)
+    assert [u.program_id for u in prog.contained] == ["INNERPGM"]
+    back = _roundtrip(prog)
+    assert back == prog
+    inner = back.contained[0]
+    assert inner.data_by_name["WS-TARGET"] is inner.data_items[0]
+    out = tmp_path / "v8.parse.json"
+    write_parse_bundle(out, source_name="n.cbl", source_text=src,
+                       fmt=SourceFormat.FIXED, program=prog)
+    doc = json.loads(out.read_text(encoding="utf-8"))
+    assert doc["version"] == VERSION == 9
+    doc["version"] = 8
+    del doc["program"]["contained"]
+    out.write_text(json.dumps(doc), encoding="utf-8")
+    old = open_parse_bundle(out).program()
+    assert old.contained == [] and old.nested_programs == ["INNERPGM"]

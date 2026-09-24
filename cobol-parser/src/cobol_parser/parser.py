@@ -137,20 +137,25 @@ _ID_PARAGRAPHS = frozenset({
 _END_PROGRAM_RE = re.compile(r"\bEND\s+PROGRAM\b(?:\s+([A-Z0-9][A-Z0-9-]*))?", re.I)
 
 
-def _split_program_units(lines: List[CodeLine]) -> Tuple[List[CodeLine], List[str]]:
+def _split_program_units(lines: List[CodeLine]
+                         ) -> Tuple[List[CodeLine], List[Tuple[str, List[CodeLine], List[str]]]]:
     """Separate the MAIN (first) program's own lines from any CONTAINED programs.
 
     IBM COBOL allows nested/contained programs: ``PROGRAM-ID. OUTER.`` may contain
     ``PROGRAM-ID. INNER. ... END PROGRAM INNER.`` before its own ``END PROGRAM OUTER.``.
-    The whole file is parsed as one program today, so a contained program's DATA/PROCEDURE
-    divisions fold into the outer one (corrupting its recovered logic) and a ``CALL 'INNER'``
-    looks like a missing external module.
+    Parsed as one program, a contained program's DATA/PROCEDURE divisions fold into the
+    outer one (corrupting its recovered logic) and a ``CALL 'INNER'`` looks like a missing
+    external module.
 
-    Returns ``(main_lines, contained_names)``: the outer program's own lines with every
-    contained program's body removed, and the names of the contained programs. A source
-    with a single ``PROGRAM-ID`` (the overwhelmingly common case, and every existing
-    fixture) has no contained programs, so the lines are returned unchanged and the name
-    list is empty - this pass is then a no-op and output is byte-identical."""
+    Returns ``(main_lines, units)``: the outer program's own lines with every contained
+    program's body removed, and one ``(name, lines, nested)`` per contained program at ANY
+    depth, in source order. A unit's ``lines`` are its own - its IDENTIFICATION DIVISION
+    header through its END PROGRAM, minus the bodies of the units IT contains, which are
+    units of their own - and ``nested`` names those. So every line of the source belongs
+    to exactly one unit and nothing is parsed twice. A source with a single ``PROGRAM-ID``
+    (the overwhelmingly common case, and every existing fixture) has no contained programs,
+    so the lines are returned unchanged and the unit list is empty - this pass is then a
+    no-op and output is byte-identical."""
     # Only the same-line pattern counts here: a contained program whose name sits on the
     # NEXT line is still folded into the outer one, because the forward scan that recovers
     # it belongs to _find_program_id (which needs one name, not a nesting depth).
@@ -159,42 +164,51 @@ def _split_program_units(lines: List[CodeLine]) -> Tuple[List[CodeLine], List[st
         return lines, []
 
     main_lines: List[CodeLine] = []
-    contained: List[str] = []
-    depth = 0                       # 0 = outside; 1 = in the main program; >=2 = contained
+    units: List[Tuple[str, List[CodeLine], List[str]]] = []
+    # The units open at this point, innermost last. Empty = outside every program (the
+    # preamble, or after the main END PROGRAM); the main program is the one at the bottom,
+    # and its lines are `main_lines`.
+    stack: List[Tuple[str, List[CodeLine], List[str]]] = []
+
+    def own_lines() -> List[CodeLine]:
+        return stack[-1][1] if len(stack) > 1 else main_lines
+
     for cl in lines:
         mid = _PROGRAM_ID_RE.search(cl.text)
         if mid:
-            depth += 1
-            if depth == 1:
-                main_lines.append(cl)           # the main program's own PROGRAM-ID
-            else:
-                contained.append(mid.group(1).upper())   # a contained program - excluded
+            name = mid.group(1).upper()
+            unit_lines: List[CodeLine] = []
+            if stack:
                 # Its (optional) IDENTIFICATION DIVISION header sits on the line just
-                # before its PROGRAM-ID and was appended to the main program above -
-                # drop it too, so only the outer program's own lines remain.
-                if main_lines and re.search(
-                        r"\bIDENTIFICATION\s+DIVISION\b", main_lines[-1].text, re.I):
-                    main_lines.pop()
+                # before its PROGRAM-ID and went to the enclosing unit - it is this one's.
+                outer = own_lines()
+                if outer and re.search(
+                        r"\bIDENTIFICATION\s+DIVISION\b", outer[-1].text, re.I):
+                    unit_lines.append(outer.pop())
+                for _, _, nested in stack[1:]:
+                    nested.append(name)             # contained by every unit still open
+                units.append((name, unit_lines, []))
+                stack.append(units[-1])
+            else:
+                stack.append((name, main_lines, []))
+            own_lines().append(cl)
             continue
         if _END_PROGRAM_RE.search(cl.text):
-            if depth == 1:
-                main_lines.append(cl)           # the main program's own END PROGRAM
-            depth = max(0, depth - 1)
-            continue
-        if depth <= 1:
-            main_lines.append(cl)               # preamble (0) or main-program body (1)
-        # depth >= 2: inside a contained program - dropped from the main program's lines
+            if stack:
+                own_lines().append(cl)
+                stack.pop()
+            continue                                # one with nothing open is dropped
+        own_lines().append(cl)                      # outside every unit: the main's
     # A contained program is ALWAYS delimited by END PROGRAM (IBM requires every unit to
-    # carry one once any nesting is present). If the walk did not cleanly close (depth != 0),
-    # these are NOT well-formed nested programs but concatenated separate compilation units
-    # (or a nested unit missing its END PROGRAM) - and the loop has just dropped a whole
-    # unit's body, taking its CALLs out of the dependency manifest. That silent loss is worse
-    # than not splitting, so fall back to the pre-nesting behaviour: one program, nothing
-    # removed, no contained names. Well-formed nesting (depth returns to 0) is unaffected.
-    if depth != 0:
+    # carry one once any nesting is present). If the walk did not cleanly close (a unit is
+    # still open), these are NOT well-formed nested programs but concatenated separate
+    # compilation units (or a nested unit missing its END PROGRAM) - and splitting would
+    # take a whole unit's body, CALLs and all, out of the main program on a guess about
+    # where it ends. So fall back to the pre-nesting behaviour: one program, nothing
+    # removed, no contained units. Well-formed nesting (every unit closed) is unaffected.
+    if stack:
         return lines, []
-    # Preserve first-seen order, drop duplicates deterministically (no set iteration).
-    return main_lines, list(dict.fromkeys(contained))
+    return main_lines, units
 
 
 def _rest_line(cl: CodeLine, rest: str) -> CodeLine:
@@ -352,26 +366,40 @@ def parse_program(source: str, fmt: Optional[SourceFormat] = None,
                   resolver: Optional[CopybookResolver] = None) -> Program:
     if fmt is None:
         fmt = detect_source_format(source).format
-    lines = normalize(source, fmt)
-    pre = preprocess(lines, resolver, fmt=fmt)
-    lines = pre.lines
+    pre = preprocess(normalize(source, fmt), resolver, fmt=fmt)
     # Separate any CONTAINED (nested) programs so their bodies do not fold into the outer
     # program, and so a CALL to one is recognised as internal rather than a missing module.
-    lines, contained = _split_program_units(lines)
+    lines, units = _split_program_units(pre.lines)
+    member_notes = []
+    if pre.expanded:
+        member_notes.append("Expanded copybooks: " + ", ".join(sorted(set(pre.expanded))))
+    for member in sorted(set(pre.missing)):
+        member_notes.append(
+            f"COPY {member}: not found - data/logic it defines is missing from the model")
+    member_notes.extend(n for n in pre.notes if "not found" not in n and "recursive" in n)
+    prog = _parse_unit(lines, [name for name, _, _ in units], member_notes)
+    prog.copybooks = pre.copybooks
+    # A contained program is part of this compilation unit, so its CALLs, SQL and CICS
+    # commands are dependencies of this member: each is parsed as a Program of its own
+    # rather than discarded with its lines. The copybooks, and the notes about them, are
+    # the member's and stay on the main program.
+    prog.contained = [_parse_unit(unit_lines, nested, [])
+                      for _, unit_lines, nested in units]
+    return prog
+
+
+def _parse_unit(lines: List[CodeLine], nested: List[str],
+                member_notes: List[str]) -> Program:
+    """One program unit's own lines -> its Program (``nested``: the units it contains)."""
     program_id, program_id_line = _find_program_id(lines)
     prog = Program(program_id=program_id, program_id_line=program_id_line)
-    prog.nested_programs = contained
-    prog.copybooks = pre.copybooks
-    if contained:
+    # First-seen order, duplicates dropped deterministically (no set iteration).
+    prog.nested_programs = list(dict.fromkeys(nested))
+    if prog.nested_programs:
         prog.notes.append(
-            "Contained (nested) program(s): " + ", ".join(contained)
+            "Contained (nested) program(s): " + ", ".join(prog.nested_programs)
             + " - parsed out of the main program; a CALL to one is an internal call")
-    if pre.expanded:
-        prog.notes.append("Expanded copybooks: " + ", ".join(sorted(set(pre.expanded))))
-    for member in sorted(set(pre.missing)):
-        prog.notes.append(
-            f"COPY {member}: not found - data/logic it defines is missing from the model")
-    prog.notes.extend(n for n in pre.notes if "not found" not in n and "recursive" in n)
+    prog.notes.extend(member_notes)
 
     if any(re.search(r"\bPROCEDURE\s+DIVISION\b", cl.text, re.I) for cl in lines):
         prog.has_procedure_division = True

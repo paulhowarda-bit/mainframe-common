@@ -70,7 +70,10 @@ FORMAT = "cobol-parser"
 #   8  the dataChange key on Program.sql_cursors: {verb, hostVars} for a cursor over a
 #      data-change table reference, whose OPEN writes the table. Absent on a v<=7
 #      bundle means UNKNOWN - that cursor's OPEN publishes no write, as it did before.
-VERSION = 8
+#   9  Program.contained: each contained program, parsed. Absent (a v<=8 bundle) means
+#      the units were never parsed, NOT that they have no dependencies - their names are
+#      still in nested_programs.
+VERSION = 9
 #: The producer name this package writes. An external producer (a different parser
 #: emitting the same contract) writes its own, so a reader can tell whose parse it is.
 PRODUCER = "cobol-parser-python"
@@ -170,6 +173,8 @@ def program_to_dict(program: Program) -> dict:
                         f"data_items; the parse bundle cannot preserve its identity")
                 by[name] = i
             out[f.name] = by
+        elif f.name == "contained":
+            out[f.name] = [program_to_dict(unit) for unit in program.contained]
         else:
             out[f.name] = _encode(getattr(program, f.name))
     return out
@@ -185,6 +190,8 @@ def program_from_dict(data: dict) -> Program:
             continue
         if ("Program", k) in _PAIR_LIST_FIELDS:
             kwargs[k] = [tuple(pair) for pair in v]
+        elif k == "contained":
+            kwargs[k] = [program_from_dict(unit) for unit in v]
         else:
             kwargs[k] = _decode(v)
     try:

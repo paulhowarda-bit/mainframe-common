@@ -317,6 +317,12 @@ class Program:
     # INTERNAL call, not an external dependency - so the classifier can tell a contained
     # program (e.g. USEMQ inside FBBMQPNT) apart from a missing external module.
     nested_programs: List[str] = field(default_factory=list)
+    # Each contained program, parsed: one Program per unit at ANY depth, in source order,
+    # so a flat walk sees every unit once. A unit holds its own lines only (a unit nested
+    # inside it is its own entry here, named by its `nested_programs`), and its own
+    # `contained` is empty. The unit's CALLs, SQL and CICS commands are dependencies of
+    # this member; a CALL to a name in `nested_programs` is still internal.
+    contained: List[Program] = field(default_factory=list)
     # SQL declarations recovered from the WHOLE expanded stream - data division and
     # copybooks included, where production code actually keeps them. The statement
     # parser only walks the PROCEDURE DIVISION, so a cursor DECLAREd in

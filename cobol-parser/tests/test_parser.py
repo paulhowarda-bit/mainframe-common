@@ -1411,3 +1411,184 @@ def test_an_ordinary_cursor_carries_no_data_change_key():
     """Only the data-change form gets the key, so no existing parse output moves."""
     assert "dataChange" not in _cursor_row("SELECT ID FROM T WHERE ID = :WS-ID")
     assert "dataChange" not in _cursor_row("SELECT ID FROM FINAL WHERE ID = :WS-ID")
+
+
+# --------------------------------------------------------------------------- #
+# a contained program's body is parsed, not discarded (upstream ledger item 55)
+#
+# _split_program_units took each contained unit's lines out of the main program - right,
+# because folding them in corrupts the outer program's logic - and then nothing parsed
+# them. A contained program is part of the same compilation unit, so its CALLs are
+# dependencies of the member; they vanished with its body, and `nested_programs` (names
+# only) gave a consumer no way to get them back.
+# --------------------------------------------------------------------------- #
+
+from cobol_parser.analysis import analyze_calls                          # noqa: E402
+from cobol_parser.model import walk_statements                           # noqa: E402
+from cobol_parser.normalizer import SourceFormat, normalize              # noqa: E402
+from cobol_parser.parser import _split_program_units                     # noqa: E402
+
+_OUTER_WITH_TWO_UNITS = (
+    "       IDENTIFICATION DIVISION.\n"
+    "       PROGRAM-ID. OUTERPGM.\n"
+    "       DATA DIVISION.\n"
+    "       WORKING-STORAGE SECTION.\n"
+    "       01  WS-OUT       PIC X(8).\n"
+    "       PROCEDURE DIVISION.\n"
+    "       0000-MAIN.\n"
+    "           CALL 'INNERONE'\n"
+    "           CALL 'INNERTWO'\n"
+    "           GOBACK.\n"
+    "       IDENTIFICATION DIVISION.\n"
+    "       PROGRAM-ID. INNERONE.\n"
+    "       PROCEDURE DIVISION.\n"
+    "       1000-ONE.\n"
+    "           CALL 'EXTMOD'\n"
+    "           GOBACK.\n"
+    "       END PROGRAM INNERONE.\n"
+    "       IDENTIFICATION DIVISION.\n"
+    "       PROGRAM-ID. INNERTWO.\n"
+    "       DATA DIVISION.\n"
+    "       WORKING-STORAGE SECTION.\n"
+    "       05  WS-TARGET    PIC X(8) VALUE 'OTHERMOD'.\n"
+    "       PROCEDURE DIVISION.\n"
+    "       2000-TWO.\n"
+    "           CALL WS-TARGET\n"
+    "           GOBACK.\n"
+    "       END PROGRAM INNERTWO.\n"
+    "       END PROGRAM OUTERPGM.\n"
+)
+
+
+def _call_targets(unit):
+    """What one unit calls: literal targets, plus dynamic ones its own analysis names."""
+    analysis = analyze_calls(unit)
+    out = []
+    for para in unit.paragraphs:
+        for st in walk_statements(para.statements):
+            if isinstance(st, CallStmt):
+                res = analysis.resolve(st.target) if st.dynamic else None
+                out.append(res.resolved if res else st.target)
+    return out
+
+
+def _member_manifest(prog):
+    """The consumer the ledger describes: every unit's calls, minus the internal ones."""
+    internal = set(prog.nested_programs)
+    return [t for unit in [prog] + prog.contained for t in _call_targets(unit)
+            if t not in internal]
+
+
+def test_a_contained_programs_external_calls_reach_the_members_manifest():
+    prog = parse_program(_OUTER_WITH_TWO_UNITS)
+    manifest = _member_manifest(prog)
+    assert manifest == ["EXTMOD", "OTHERMOD"], (
+        "a contained unit's CALLs were dropped with its body")
+    # ...and a call to a contained unit is internal, never a dependency.
+    assert "INNERONE" not in manifest and "INNERTWO" not in manifest
+
+
+def test_contained_holds_one_program_per_unit_and_nested_programs_is_unchanged():
+    prog = parse_program(_OUTER_WITH_TWO_UNITS)
+    assert prog.nested_programs == ["INNERONE", "INNERTWO"]
+    assert [u.program_id for u in prog.contained] == ["INNERONE", "INNERTWO"]
+    one, two = prog.contained
+    assert [p.name for p in one.paragraphs] == ["1000-ONE"]
+    assert [p.name for p in two.paragraphs] == ["2000-TWO"]
+    # Each unit's data is its own: the dynamic target resolves from INNERTWO's storage,
+    # and none of it leaked into the outer program.
+    assert two.working_values == {"WS-TARGET": "OTHERMOD"}
+    assert "WS-TARGET" not in prog.data_by_name
+    assert [p.name for p in prog.paragraphs] == ["0000-MAIN"]
+    # The copybooks and their notes belong to the member, which is the main program.
+    assert one.copybooks == [] and one.notes == []
+
+
+def test_a_contained_unit_keeps_its_own_identification_division_line():
+    prog = parse_program(_OUTER_WITH_TWO_UNITS)
+    one = prog.contained[0]
+    assert one.program_id_line == 12
+    _, units = _split_program_units(normalize(_OUTER_WITH_TWO_UNITS, SourceFormat.FIXED))
+    first_line = units[0][1][0]
+    assert "IDENTIFICATION DIVISION" in first_line.text and first_line.line == 11
+
+
+def test_a_single_program_source_is_left_alone():
+    src = (
+        "       IDENTIFICATION DIVISION.\n"
+        "       PROGRAM-ID. ONLYPGM.\n"
+        "       PROCEDURE DIVISION.\n"
+        "       0000-MAIN.\n"
+        "           CALL 'ONLYEXT'\n"
+        "           GOBACK.\n"
+        "       END PROGRAM ONLYPGM.\n"
+    )
+    lines = normalize(src, SourceFormat.FIXED)
+    main, units = _split_program_units(lines)
+    assert main is lines and units == []
+    prog = parse_program(src)
+    assert prog.nested_programs == [] and prog.contained == []
+
+
+def test_malformed_nesting_still_falls_back_to_one_program():
+    """Two PROGRAM-IDs and no END PROGRAM: concatenated units, not nesting. Splitting
+    on a guess would drop a whole body, so nothing is split - and the second unit's CALL
+    stays visible in the one program rather than vanishing into an unparsed unit."""
+    src = (
+        "       IDENTIFICATION DIVISION.\n"
+        "       PROGRAM-ID. FIRSTPGM.\n"
+        "       PROCEDURE DIVISION.\n"
+        "       0000-MAIN.\n"
+        "           GOBACK.\n"
+        "       IDENTIFICATION DIVISION.\n"
+        "       PROGRAM-ID. SECNDPGM.\n"
+        "       PROCEDURE DIVISION.\n"
+        "       1000-SECOND.\n"
+        "           CALL 'SECNDEXT'\n"
+        "           GOBACK.\n"
+    )
+    prog = parse_program(src)
+    assert prog.nested_programs == [] and prog.contained == []
+    assert "SECNDEXT" in _call_targets(prog)
+
+
+_THREE_DEEP = (
+    "       IDENTIFICATION DIVISION.\n"
+    "       PROGRAM-ID. TOPPGM.\n"
+    "       PROCEDURE DIVISION.\n"
+    "       0000-TOP.\n"
+    "           CALL 'MIDPGM'\n"
+    "           GOBACK.\n"
+    "       IDENTIFICATION DIVISION.\n"
+    "       PROGRAM-ID. MIDPGM.\n"
+    "       PROCEDURE DIVISION.\n"
+    "       1000-MID.\n"
+    "           CALL 'DEEPPGM'\n"
+    "           CALL 'MIDEXT'\n"
+    "           GOBACK.\n"
+    "       IDENTIFICATION DIVISION.\n"
+    "       PROGRAM-ID. DEEPPGM.\n"
+    "       PROCEDURE DIVISION.\n"
+    "       2000-DEEP.\n"
+    "           CALL 'DEEPEXT'\n"
+    "           GOBACK.\n"
+    "       END PROGRAM DEEPPGM.\n"
+    "       END PROGRAM MIDPGM.\n"
+    "       END PROGRAM TOPPGM.\n"
+)
+
+
+def test_a_unit_inside_a_contained_unit_is_parsed_too_at_any_depth():
+    """The depth supported is any: `contained` is FLAT - one Program per unit at every
+    depth, each holding only its own lines - so one pass over it sees every unit exactly
+    once, and a consumer that does not recurse still loses nothing."""
+    prog = parse_program(_THREE_DEEP)
+    assert prog.nested_programs == ["MIDPGM", "DEEPPGM"]          # as before this change
+    assert [u.program_id for u in prog.contained] == ["MIDPGM", "DEEPPGM"]
+    mid, deep = prog.contained
+    assert mid.nested_programs == ["DEEPPGM"] and deep.nested_programs == []
+    assert mid.contained == [] and deep.contained == []
+    assert [p.name for p in mid.paragraphs] == ["1000-MID"]       # DEEP's body not folded in
+    assert _call_targets(mid) == ["DEEPPGM", "MIDEXT"]
+    assert _call_targets(deep) == ["DEEPEXT"]
+    assert _member_manifest(prog) == ["MIDEXT", "DEEPEXT"]
