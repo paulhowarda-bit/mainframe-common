@@ -237,6 +237,7 @@ def _entries(region: List[CodeLine], fd_records: Optional[Dict[str, List[str]]] 
     fd = None
     fd_buf: List[str] = []                      # the open FD/SD entry, until its period
     buf: List[str] = []
+    in_exec = False                             # inside EXEC ... END-EXEC
     first_line = 0
     first_origin = None
     first_fd = None
@@ -275,6 +276,15 @@ def _entries(region: List[CodeLine], fd_records: Optional[Dict[str, List[str]]] 
             continue
         if up.startswith(("FD ", "SD ", "RD ", "FD.", "01 FD")) or up in ("FD", "SD"):
             # File/sort descriptions - skip the FD line itself; its 01 follows.
+            continue
+        # An EXEC block is no part of any data entry, and IBM COBOL does not require a
+        # period after its END-EXEC. Glued onto the entry above, a period-less END-EXEC
+        # left that entry "unterminated", and the next level number was absorbed into it.
+        if in_exec or re.match(r"EXEC\b", up):
+            if buf:
+                yield " ".join(buf), first_line, section, first_origin, first_fd
+                buf = []
+            in_exec = not re.search(r"\bEND-EXEC\b", up)
             continue
         # A data entry runs until its terminating period, and a level number only starts a
         # NEW entry at that boundary. A clause continued onto a line that happens to begin

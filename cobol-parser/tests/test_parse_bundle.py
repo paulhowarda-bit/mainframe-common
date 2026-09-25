@@ -411,9 +411,50 @@ def test_v9_contained_programs_round_trip_and_v8_bundles_still_open(tmp_path):
     write_parse_bundle(out, source_name="n.cbl", source_text=src,
                        fmt=SourceFormat.FIXED, program=prog)
     doc = json.loads(out.read_text(encoding="utf-8"))
-    assert doc["version"] == VERSION == 9
+    assert doc["version"] == VERSION
     doc["version"] = 8
     del doc["program"]["contained"]
     out.write_text(json.dumps(doc), encoding="utf-8")
     old = open_parse_bundle(out).program()
     assert old.contained == [] and old.nested_programs == ["INNERPGM"]
+
+
+def test_v10_statement_origin_and_copy_parent_round_trip_and_v9_bundles_still_open(tmp_path):
+    """VERSION 10 carries Stmt.origin, a field the constructor does not take, and the
+    `parent` key on copybook rows. A v9 bundle has neither: its statements open with
+    origin None and its rows with no parent key, which reads as unknown."""
+    from cobol_parser.preprocessor import CopybookResolver
+    members = {"OUTER": "           COPY INNER.\n",
+               "INNER": "           MOVE 'C' TO WS-FLAG\n"}
+    src = (
+        "       IDENTIFICATION DIVISION.\n"
+        "       PROGRAM-ID. T.\n"
+        "       DATA DIVISION.\n"
+        "       WORKING-STORAGE SECTION.\n"
+        "       01  WS-FLAG  PIC X.\n"
+        "       PROCEDURE DIVISION.\n"
+        "       0000-MAIN.\n"
+        "           COPY OUTER.\n"
+        "           GOBACK.\n"
+    )
+    prog = parse_program(src, resolver=CopybookResolver(paths=[], fetcher=members.get))
+    back = _roundtrip(prog)
+    assert back == prog
+    assert back.paragraphs[0].statements[0].origin == "INNER"
+    assert [(r["member"], r["parent"]) for r in back.copybooks] == [
+        ("OUTER", None), ("INNER", "OUTER")]
+    out = tmp_path / "v9.parse.json"
+    write_parse_bundle(out, source_name="n.cbl", source_text=src,
+                       fmt=SourceFormat.FIXED, program=prog)
+    doc = json.loads(out.read_text(encoding="utf-8"))
+    assert doc["version"] == VERSION == 10
+    doc["version"] = 9
+    for para in doc["program"]["paragraphs"]:
+        for st in para["statements"]:
+            del st["origin"]
+    for row in doc["program"]["copybooks"]:
+        del row["parent"]
+    out.write_text(json.dumps(doc), encoding="utf-8")
+    old = open_parse_bundle(out).program()
+    assert old.paragraphs[0].statements[0].origin is None
+    assert all("parent" not in r for r in old.copybooks)

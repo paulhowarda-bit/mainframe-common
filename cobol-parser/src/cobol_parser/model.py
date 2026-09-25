@@ -16,6 +16,10 @@ from typing import Dict, List, Optional, Tuple
 @dataclass
 class Stmt:
     line: int
+    # The copybook member the statement's first token came from; None when the member
+    # being parsed wrote it. Stamped by the parser after construction (init=False keeps
+    # every subclass's positional fields valid on Python 3.9, which has no kw_only).
+    origin: Optional[str] = field(default=None, init=False)
 
 
 @dataclass

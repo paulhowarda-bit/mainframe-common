@@ -1592,3 +1592,111 @@ def test_a_unit_inside_a_contained_unit_is_parsed_too_at_any_depth():
     assert _call_targets(mid) == ["DEEPPGM", "MIDEXT"]
     assert _call_targets(deep) == ["DEEPEXT"]
     assert _member_manifest(prog) == ["MIDEXT", "DEEPEXT"]
+
+
+# --- batch-23 ledger item 57: an entry after a period-less END-EXEC ---------------------
+
+def _exec_then_entry(end_exec: str, entry: str) -> str:
+    return (
+        "       IDENTIFICATION DIVISION.\n"
+        "       PROGRAM-ID. T.\n"
+        "       DATA DIVISION.\n"
+        "       WORKING-STORAGE SECTION.\n"
+        "       01  WS-BEFORE                    PIC X(01) VALUE 'B'.\n"
+        "           EXEC SQL\n"
+        "               DECLARE C1 CURSOR FOR\n"
+        "               SELECT A FROM T\n"
+        f"           {end_exec}\n"
+        f"       01  {entry:<28} PIC X(07) VALUE 'PGMR600'.\n"
+        "       01  WS-AFTER                     PIC X(01) VALUE 'A'.\n"
+        "       PROCEDURE DIVISION.\n"
+        "       0000-MAIN.\n"
+        "           CALL WS-PGMR600.\n"
+        "           STOP RUN.\n"
+    )
+
+
+def _items(src):
+    return [(d.line, d.name, d.value) for d in parse_program(src).data_items]
+
+
+def test_an_entry_after_a_period_less_end_exec_is_its_own_item():
+    assert _items(_exec_then_entry("END-EXEC", "WS-PGMR600")) == [
+        (5, "WS-BEFORE", "'B'"), (10, "WS-PGMR600", "'PGMR600'"), (11, "WS-AFTER", "'A'")]
+
+
+def test_a_period_on_end_exec_does_not_change_the_answer():
+    assert (_items(_exec_then_entry("END-EXEC", "WS-PGMR600"))
+            == _items(_exec_then_entry("END-EXEC.", "WS-PGMR600")))
+
+
+def test_a_call_through_it_resolves_with_a_period_less_end_exec():
+    from cobol_parser.analysis import analyze_calls
+    res = analyze_calls(parse_program(_exec_then_entry("END-EXEC", "WS-PGMR600"))) \
+        .resolve("WS-PGMR600")
+    assert (res.confident, res.resolved) == (True, "PGMR600")
+
+
+def test_a_filler_after_a_period_less_end_exec_is_its_own_item():
+    assert [(ln, n) for ln, n, _ in _items(_exec_then_entry("END-EXEC", "FILLER"))] == [
+        (5, "WS-BEFORE"), (10, "FILLER"), (11, "WS-AFTER")]
+
+
+# --- batch-23 ledger item 58: which COPY sites this member wrote, and whose a statement is
+
+def _nested_copy_program():
+    from cobol_parser.preprocessor import CopybookResolver
+    members = {
+        "OUTER": ("       01  OUTER-REC.\n"
+                  "           COPY INNER.\n"),
+        "INNER": "           05  INNER-FLD  PIC X(4).\n",
+        "PROCCPY": "           MOVE 'C' TO WS-FLAG\n",
+    }
+    src = (
+        "       IDENTIFICATION DIVISION.\n"
+        "       PROGRAM-ID. T.\n"
+        "       DATA DIVISION.\n"
+        "       WORKING-STORAGE SECTION.\n"
+        "       COPY OUTER.\n"
+        "       01  WS-FLAG  PIC X.\n"
+        "       PROCEDURE DIVISION.\n"
+        "       0000-MAIN.\n"
+        "           MOVE 'M' TO WS-FLAG\n"
+        "           COPY PROCCPY.\n"
+        "           GOBACK.\n"
+    )
+    return parse_program(src, resolver=CopybookResolver(paths=[], fetcher=members.get))
+
+
+def test_a_nested_copy_row_names_the_member_that_wrote_it():
+    rows = {r["member"]: r for r in _nested_copy_program().copybooks}
+    assert rows["OUTER"]["parent"] is None
+    assert rows["INNER"]["parent"] == "OUTER"
+    assert rows["PROCCPY"]["parent"] is None
+
+
+def test_a_nested_copy_rows_line_is_a_line_of_its_parent():
+    rows = {r["member"]: r for r in _nested_copy_program().copybooks}
+    assert (rows["OUTER"]["line"], rows["INNER"]["line"]) == (5, 2)
+
+
+def test_a_statement_copied_into_a_paragraph_carries_its_copybook():
+    para = _nested_copy_program().paragraphs[0]
+    assert para.origin is None
+    assert [(s.text.split()[1], s.origin) for s in para.statements
+            if getattr(s, "verb", None) == "MOVE"] == [
+        ("'M'", None), ("'C'", "PROCCPY")]
+
+
+def test_a_statement_the_member_wrote_has_no_origin():
+    prog = parse_program(
+        "       IDENTIFICATION DIVISION.\n"
+        "       PROGRAM-ID. T.\n"
+        "       PROCEDURE DIVISION.\n"
+        "       0000-MAIN.\n"
+        "           IF 1 = 1\n"
+        "               CALL 'SUB'\n"
+        "           END-IF\n"
+        "           GOBACK.\n")
+    stmts = list(walk_statements(prog.paragraphs[0].statements))
+    assert len(stmts) >= 3 and {s.origin for s in stmts} == {None}

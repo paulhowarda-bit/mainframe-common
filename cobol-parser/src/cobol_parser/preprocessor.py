@@ -356,8 +356,12 @@ def _expand_member(member, pairs, resolver, res: PreprocessResult, seen: set,
     key = member.strip().strip("'\"").upper()
 
     def record(status: str, source: Optional[str] = None) -> None:
+        # `parent` is the member whose text wrote this COPY, or None when the file being
+        # parsed did. Without it an inherited row is indistinguishable from a direct one,
+        # and its `line` silently belongs to a different file. The recursion below
+        # stamps it on the rows coming back from a nested member.
         row = {"member": key, "status": status, "via": via, "replacing": replacing,
-               "line": source_line}
+               "line": source_line, "parent": None}
         if replacing and pairs:
             # The parsed REPLACING clause as (token, replacement) pairs, so a consumer
             # can see WHAT was substituted without re-parsing the COPY statement.
@@ -401,7 +405,10 @@ def _expand_member(member, pairs, resolver, res: PreprocessResult, seen: set,
             res.expanded.append(x)
     res.missing.extend(inner.missing)
     res.notes.extend(inner.notes)
-    res.copybooks.extend(inner.copybooks)   # nested COPY inside this member
+    for row in inner.copybooks:             # nested COPY inside this member
+        if row["parent"] is None:
+            row["parent"] = key
+    res.copybooks.extend(inner.copybooks)
     for cl in inner.lines:
         new_text = _apply_replacing(cl.text, pairs) if pairs else cl.text
         res.lines.append(CodeLine(text=new_text, line=cl.line,

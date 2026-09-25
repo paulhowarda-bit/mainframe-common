@@ -73,7 +73,11 @@ FORMAT = "cobol-parser"
 #   9  Program.contained: each contained program, parsed. Absent (a v<=8 bundle) means
 #      the units were never parsed, NOT that they have no dependencies - their names are
 #      still in nested_programs.
-VERSION = 9
+#  10  Stmt.origin (the copybook member a statement came from) and the `parent` key on
+#      each Program.copybooks row (the member whose text wrote that COPY). Absent on a
+#      v<=9 bundle means UNKNOWN, not "the member wrote it": an old bundle's statements
+#      decode with origin None and its rows carry no parent key at all.
+VERSION = 10
 #: The producer name this package writes. An external producer (a different parser
 #: emitting the same contract) writes its own, so a reader can tell whose parse it is.
 PRODUCER = "cobol-parser-python"
@@ -145,12 +149,18 @@ def _decode(obj):
         for key in list(kwargs):
             if (tag, key) in _PAIR_LIST_FIELDS:
                 kwargs[key] = [tuple(pair) for pair in kwargs[key]]
+        # A field the constructor does not take (Stmt.origin) is set after it runs.
+        late = {f.name: kwargs.pop(f.name) for f in dataclasses.fields(cls)
+                if not f.init and f.name in kwargs}
         try:
-            return cls(**kwargs)
+            node = cls(**kwargs)
         except TypeError as exc:
             raise ParseBundleError(
                 f"a {tag} node in this parse bundle does not match this tool's model "
                 f"({exc}) - the bundle was written by a different version") from None
+        for key, value in late.items():
+            setattr(node, key, value)
+        return node
     return obj
 
 

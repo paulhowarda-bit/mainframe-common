@@ -719,6 +719,7 @@ def _group_paragraphs(body: List[CodeLine],
         except Exception as exc:  # noqa: BLE001 - deliberate catch-all for corpus safety
             raw = " ".join(cl.text.strip() for cl in plines).strip()
             para.statements = [Action(line=para.line, text=raw[:200], verb="?")]
+            para.statements[0].origin = para.origin
             para.parse_error = f"{type(exc).__name__}: {exc}"
             # The one-line parse_error above rides on the paragraph (and into the output);
             # the full traceback is only recoverable here, so keep it at DEBUG (-v).
@@ -857,6 +858,15 @@ class StmtParser:
         return out
 
     def parse_statement(self, stops: Set[str]) -> Optional[Stmt]:
+        t = self._peek()
+        stmt = self._statement(stops)
+        if stmt is not None:
+            stmt.origin = t.origin
+            if isinstance(stmt, HandledStmt):
+                stmt.inner.origin = t.origin
+        return stmt
+
+    def _statement(self, stops: Set[str]) -> Optional[Stmt]:
         t = self._peek()
         if t is None or t.kind != "word":
             # Stray token; consume so we make progress.
