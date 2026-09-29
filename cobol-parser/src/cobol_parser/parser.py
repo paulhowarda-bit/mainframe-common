@@ -26,7 +26,8 @@ from typing import Callable, Dict, List, Optional, Set, Tuple
 
 from .normalizer import CodeLine, SourceFormat, detect_source_format, normalize
 from .lexer import Token, tokenize
-from .data_division import DataItem, elementary_subordinates, parse_data_division
+from .data_division import (DataItem, division_header, elementary_subordinates,
+                            parse_data_division)
 from .textutil import mask_literals
 from .preprocessor import CopybookResolver, preprocess
 from .model import (
@@ -159,7 +160,9 @@ def _split_program_units(lines: List[CodeLine]
     # Only the same-line pattern counts here: a contained program whose name sits on the
     # NEXT line is still folded into the outer one, because the forward scan that recovers
     # it belongs to _find_program_id (which needs one name, not a nesting depth).
-    n_ids = sum(1 for cl in lines if _PROGRAM_ID_RE.search(cl.text))
+    # And only a line the member wrote itself: a COPYed member's PROGRAM-ID / END PROGRAM
+    # is text inside this unit, never a boundary of one.
+    n_ids = sum(1 for cl in lines if cl.origin is None and _PROGRAM_ID_RE.search(cl.text))
     if n_ids <= 1:
         return lines, []
 
@@ -174,7 +177,8 @@ def _split_program_units(lines: List[CodeLine]
         return stack[-1][1] if len(stack) > 1 else main_lines
 
     for cl in lines:
-        mid = _PROGRAM_ID_RE.search(cl.text)
+        own = cl.origin is None
+        mid = own and _PROGRAM_ID_RE.search(cl.text)
         if mid:
             name = mid.group(1).upper()
             unit_lines: List[CodeLine] = []
@@ -193,7 +197,7 @@ def _split_program_units(lines: List[CodeLine]
                 stack.append((name, main_lines, []))
             own_lines().append(cl)
             continue
-        if _END_PROGRAM_RE.search(cl.text):
+        if own and _END_PROGRAM_RE.search(cl.text):
             if stack:
                 own_lines().append(cl)
                 stack.pop()
@@ -252,12 +256,9 @@ def _scan_value_clauses(items: List[DataItem]) -> dict:
 
 def _procedure_lines(lines: List[CodeLine]) -> List[CodeLine]:
     """Return body lines after the PROCEDURE DIVISION header clause (skipping any
-    ``USING ...`` continuation up to its terminating period)."""
-    start = None
-    for i, cl in enumerate(lines):
-        if re.search(r"\bPROCEDURE\s+DIVISION\b", cl.text, re.I):
-            start = i
-            break
+    ``USING ...`` continuation up to its terminating period). The header is the member's
+    own, not one a COPYed member carries (see :func:`division_header`)."""
+    start = division_header(lines, "PROCEDURE")
     if start is None:
         return []
     # Consume header lines until the one carrying the terminating period.
@@ -273,11 +274,7 @@ def _procedure_interface(lines: List[CodeLine]) -> Tuple[List[str], Optional[str
 
     These LINKAGE-backed items are the perimeter at the program's entry point - what the
     caller (COMMAREA / parameter list) passes in and what is returned."""
-    start = None
-    for i, cl in enumerate(lines):
-        if re.search(r"\bPROCEDURE\s+DIVISION\b", cl.text, re.I):
-            start = i
-            break
+    start = division_header(lines, "PROCEDURE")      # the same header the body starts at
     if start is None:
         return [], None
     header = []

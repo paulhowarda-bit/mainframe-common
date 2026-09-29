@@ -1700,3 +1700,120 @@ def test_a_statement_the_member_wrote_has_no_origin():
         "           GOBACK.\n")
     stmts = list(walk_statements(prog.paragraphs[0].statements))
     assert len(stmts) >= 3 and {s.origin for s in stmts} == {None}
+
+
+# --- ledger item 59: a division or program header a COPYed member carries
+
+_LINK_MEMBERS = {
+    # A copybook with its own LINKAGE SECTION and PROCEDURE DIVISION USING, copied into
+    # the copier's WORKING-STORAGE.
+    "LINKCPY": ("       LINKAGE SECTION.\n"
+                "       01  LK-PARM  PIC X(10).\n"
+                "       PROCEDURE DIVISION USING LK-PARM.\n"),
+    # The same text delimited as a program unit.
+    "LINKPGM": ("       IDENTIFICATION DIVISION.\n"
+                "       PROGRAM-ID. LINKPGM.\n"
+                "       LINKAGE SECTION.\n"
+                "       01  LK-PARM  PIC X(10).\n"
+                "       PROCEDURE DIVISION USING LK-PARM.\n"
+                "       END PROGRAM LINKPGM.\n"),
+}
+
+
+def _copier(member="LINKCPY", tail=""):
+    return (
+        "       IDENTIFICATION DIVISION.\n"
+        "       PROGRAM-ID. COPIER.\n"
+        "       DATA DIVISION.\n"
+        "       WORKING-STORAGE SECTION.\n"
+        "       01  WS-BEFORE  PIC X(01) VALUE 'B'.\n"
+        f"       COPY {member}.\n"
+        "       01  WS-TARGET  PIC X(07) VALUE 'PGM'.\n"
+        "       PROCEDURE DIVISION.\n"
+        "       0000-MAIN.\n"
+        "           CALL WS-TARGET\n"
+        "           GOBACK.\n" + tail
+    )
+
+
+def _with_members(src):
+    from cobol_parser.preprocessor import CopybookResolver
+    return parse_program(src, resolver=CopybookResolver(paths=[],
+                                                        fetcher=_LINK_MEMBERS.get))
+
+
+def _target(prog):
+    from cobol_parser.analysis import analyze_calls
+    res = analyze_calls(prog).resolve("WS-TARGET")
+    return res.confident, res.resolved, res.evidence
+
+
+def test_a_copied_procedure_division_does_not_end_the_data_region():
+    prog = _with_members(_copier())
+    assert "WS-TARGET" in [d.name for d in prog.data_items]
+    assert "WS-TARGET" in prog.data_by_name
+    assert _target(prog) == (True, "PGM", "assigned")
+
+
+def test_the_answer_does_not_depend_on_the_copybook_arriving():
+    with_copy, without = _with_members(_copier()), parse_program(_copier())
+    assert _target(with_copy) == _target(without) == (True, "PGM", "assigned")
+    assert ([(d.name, d.value) for d in with_copy.data_items if d.origin is None]
+            == [(d.name, d.value) for d in without.data_items])
+
+
+def test_the_copiers_own_procedure_division_still_ends_the_region():
+    from cobol_parser.data_division import _data_region
+    from cobol_parser.normalizer import SourceFormat, normalize
+    from cobol_parser.preprocessor import CopybookResolver, preprocess
+    pre = preprocess(normalize(_copier(), SourceFormat.FIXED),
+                     CopybookResolver(paths=[], fetcher=_LINK_MEMBERS.get),
+                     fmt=SourceFormat.FIXED)
+    assert [cl.text.strip() for cl in _data_region(pre.lines)][-1] == (
+        "01  WS-TARGET  PIC X(07) VALUE 'PGM'.")
+
+
+def test_a_copied_procedure_division_does_not_start_the_body():
+    prog = _with_members(_copier())
+    assert [p.name for p in prog.paragraphs] == ["0000-MAIN"]
+    assert prog.using == []
+
+
+def test_a_copied_procedure_division_is_the_header_when_the_member_wrote_none():
+    """A copybook may supply the header itself. Skipping every copied header loses the
+    whole body - and here would turn a two-literal CALL into a confident one."""
+    prog = _with_members(
+        "       IDENTIFICATION DIVISION.\n"
+        "       PROGRAM-ID. SUPPLIED.\n"
+        "       DATA DIVISION.\n"
+        "       WORKING-STORAGE SECTION.\n"
+        "       01  WS-TARGET  PIC X(07) VALUE 'PGM'.\n"
+        "       COPY LINKCPY.\n"
+        "       0000-MAIN.\n"
+        "           MOVE 'OTHER' TO WS-TARGET\n"
+        "           CALL WS-TARGET\n"
+        "           GOBACK.\n")
+    assert [p.name for p in prog.paragraphs] == ["0000-MAIN"]
+    assert prog.using == ["LK-PARM"]
+    assert _target(prog)[:2] == (False, None)
+
+
+def test_a_copied_program_unit_is_not_a_contained_program():
+    prog = _with_members(_copier("LINKPGM", "       END PROGRAM COPIER.\n"))
+    assert (prog.nested_programs, prog.contained) == ([], [])
+    assert _target(prog) == (True, "PGM", "assigned")
+
+
+def test_a_genuine_contained_program_still_splits_beside_a_copied_one():
+    prog = _with_members(_copier("LINKPGM",
+                                 "       IDENTIFICATION DIVISION.\n"
+                                 "       PROGRAM-ID. INNER.\n"
+                                 "       PROCEDURE DIVISION.\n"
+                                 "       0000-INNER.\n"
+                                 "           GOBACK.\n"
+                                 "       END PROGRAM INNER.\n"
+                                 "       END PROGRAM COPIER.\n"))
+    assert prog.nested_programs == ["INNER"]
+    assert [(c.program_id, [p.name for p in c.paragraphs]) for c in prog.contained] == [
+        ("INNER", ["0000-INNER"])]
+    assert [p.name for p in prog.paragraphs] == ["0000-MAIN"]

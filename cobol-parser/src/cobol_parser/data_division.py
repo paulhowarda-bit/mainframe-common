@@ -198,16 +198,31 @@ def parse_pic(pic: Optional[str], usage: Optional[str]) -> PicType:
     return PicType(category="unknown", usage=u, pic=raw)
 
 
+def division_header(lines: List[CodeLine], division: str, start: int = 0) -> Optional[int]:
+    """Index of the first ``<division> DIVISION`` header at or after ``start``, or None.
+
+    A header this member wrote wins over one a COPYed member carries. A copybook with its
+    own ``PROCEDURE DIVISION USING ...`` is copied into the copier's DATA DIVISION, and
+    taking that header as the copier's ended the data region at the COPY: every
+    declaration after it went unparsed, and a dynamic CALL through one lost its target.
+    A copied header is still taken when the member wrote none - a copybook that supplies
+    the header is legal COBOL, and skipping it there would lose the whole body."""
+    pattern = re.compile(rf"\b{division}\s+DIVISION\b", re.I)
+    copied = None
+    for i in range(start, len(lines)):
+        if pattern.search(lines[i].text):
+            if lines[i].origin is None:
+                return i
+            if copied is None:
+                copied = i
+    return copied
+
+
 def _data_region(lines: List[CodeLine]) -> List[CodeLine]:
-    start = end = None
-    for i, cl in enumerate(lines):
-        if start is None and re.search(r"\bDATA\s+DIVISION\b", cl.text, re.I):
-            start = i
-        elif start is not None and re.search(r"\bPROCEDURE\s+DIVISION\b", cl.text, re.I):
-            end = i
-            break
+    start = division_header(lines, "DATA")
     if start is None:
         return []
+    end = division_header(lines, "PROCEDURE", start + 1)
     return lines[start + 1:end if end is not None else len(lines)]
 
 
