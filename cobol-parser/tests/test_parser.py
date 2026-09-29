@@ -1795,6 +1795,7 @@ def test_a_copied_procedure_division_is_the_header_when_the_member_wrote_none():
         "           GOBACK.\n")
     assert [p.name for p in prog.paragraphs] == ["0000-MAIN"]
     assert prog.using == ["LK-PARM"]
+    assert prog.data_by_name["LK-PARM"].section == "LINKAGE"
     assert _target(prog)[:2] == (False, None)
 
 
@@ -1817,3 +1818,31 @@ def test_a_genuine_contained_program_still_splits_beside_a_copied_one():
     assert [(c.program_id, [p.name for p in c.paragraphs]) for c in prog.contained] == [
         ("INNER", ["0000-INNER"])]
     assert [p.name for p in prog.paragraphs] == ["0000-MAIN"]
+
+
+def test_a_copied_linkage_section_does_not_file_the_copiers_declarations():
+    """The member whose PROCEDURE DIVISION the copier overrode switched to LINKAGE, and
+    every declaration after the COPY became a caller's parameter."""
+    prog = _with_members(_copier())
+    assert [(d.name, d.section) for d in prog.data_items] == [
+        ("WS-BEFORE", "WORKING-STORAGE"), ("LK-PARM", "WORKING-STORAGE"),
+        ("WS-TARGET", "WORKING-STORAGE")]
+
+
+def test_a_copied_linkage_section_still_files_items_when_it_ends_no_division():
+    from cobol_parser.preprocessor import CopybookResolver
+    members = {"LKHDR": ("       LINKAGE SECTION.\n"
+                         "       01  LK-HDR  PIC X(10).\n")}
+    prog = parse_program(
+        "       IDENTIFICATION DIVISION.\n"
+        "       PROGRAM-ID. LKCOPY.\n"
+        "       DATA DIVISION.\n"
+        "       WORKING-STORAGE SECTION.\n"
+        "       01  WS-A  PIC X.\n"
+        "       COPY LKHDR.\n"
+        "       01  LK-MORE  PIC X(5).\n"
+        "       PROCEDURE DIVISION USING LK-HDR LK-MORE.\n"
+        "       0000-MAIN.\n"
+        "           GOBACK.\n", resolver=CopybookResolver(paths=[], fetcher=members.get))
+    assert [(d.name, d.section) for d in prog.data_items] == [
+        ("WS-A", "WORKING-STORAGE"), ("LK-HDR", "LINKAGE"), ("LK-MORE", "LINKAGE")]

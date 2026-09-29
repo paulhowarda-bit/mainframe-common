@@ -256,6 +256,12 @@ def _entries(region: List[CodeLine], fd_records: Optional[Dict[str, List[str]]] 
     first_line = 0
     first_origin = None
     first_fd = None
+    # A member whose PROCEDURE DIVISION header the copier overrode with its own (the region
+    # holds no other kind - see division_header) is no part of the copier's structure, so
+    # its section headers are not the copier's either. Obeyed, its LINKAGE SECTION filed
+    # every declaration after the COPY as a caller's parameter.
+    foreign = {cl.origin for cl in region
+               if re.search(r"\bPROCEDURE\s+DIVISION\b", cl.text, re.I)}
     for cl in region:
         t = cl.text.strip()
         up = t.upper()
@@ -269,9 +275,10 @@ def _entries(region: List[CodeLine], fd_records: Optional[Dict[str, List[str]]] 
             if buf:
                 yield " ".join(buf), first_line, section, first_origin, first_fd
                 buf = []
-            section = sec
-            fd = None
-            fd_buf = []
+            if cl.origin not in foreign:
+                section = sec
+                fd = None
+                fd_buf = []
             continue
         fm = re.match(r"^(?:FD|SD)\s+([A-Z0-9][A-Z0-9-]*)", up)
         if fm:
