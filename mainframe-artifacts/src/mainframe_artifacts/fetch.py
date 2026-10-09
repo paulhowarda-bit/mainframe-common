@@ -98,6 +98,10 @@ _KIND_TYPE: Dict[str, str] = {
     "include-member":   "cntl",
     "control-card":     "cntl",
     "dataset":          "cntl",
+    # A Control-M AutoEdit member is a PDS member like a control card, and asked for the
+    # same way. Stage 1 does NOT have it: it is not part of the JCL text JES reads, so the
+    # parse never asks for it, and this is the one place it is requested.
+    "autoedit-member":  "cntl",
     # ...and from an Easytrieve program's manifest (eztrieve_dependencies). A macro is that
     # language's textual include - it carries record layouts and whole activities - so like
     # the control members above it is normally already in hand from stage 1 and reports as
@@ -105,6 +109,17 @@ _KIND_TYPE: Dict[str, str] = {
     # which is false: it IS retrievable, and stage 1 retrieved it.
     "macro":            "macro",
 }
+
+
+def request_type(kind: str) -> Optional[str]:
+    """The type hint a member of manifest ``kind`` is requested under, or ``None``.
+
+    Public so a closure that runs BEFORE the manifest exists - the JCL record-and-replay
+    in ``jcl_dependencies.prefetch`` - asks for a PROC or a control card with the same
+    word stage 2 uses for the same row, rather than keeping its own copy of this table.
+    ``program`` answers ``cobol`` here but is requested by probing (``PROGRAM_TYPE_ORDER``);
+    nothing that calls this asks for one."""
+    return _KIND_TYPE.get(kind)
 
 # `PARM.LIB(SORTCRD)` - a dataset that names one member. The member is the retrievable
 # identity; which library it lives in is the estate service's business, not ours.
