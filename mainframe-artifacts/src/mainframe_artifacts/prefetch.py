@@ -89,9 +89,12 @@ class PrefetchResult:
     # individual member being absent, and never reported as if it were.
     unavailable: Optional[str] = None
 
-    def resolver(self) -> Callable[[str], Optional[str]]:
-        """A ``resolver(name) -> text | None`` over the store, for ``parse_jcl``."""
-        def _resolve(name: str) -> Optional[str]:
+    def resolver(self) -> Callable[..., Optional[str]]:
+        """A ``resolver(name, kind=None) -> text | None`` over the store, for ``parse_jcl``.
+
+        ``kind`` is accepted and not consulted: by the time this runs, the request that
+        needed it has been made, and the store holds what came back under the name."""
+        def _resolve(name: str, kind: Optional[str] = None) -> Optional[str]:
             hit = self.store.get(member_key(name))
             if hit is None:
                 # A control-card DD names a full DSN; the member is what was retrieved.
@@ -328,10 +331,15 @@ class Prefetcher:
                 got = exc
         return self._record(planned, got)
 
-    def obtain_wave(self, items: List[Tuple[str, str]],
+    def obtain_wave(self, items: List[Tuple[str, ...]],
                     type_hint: Optional[str] = None,
                     jobs: int = 1) -> List[Tuple[str, str]]:
         """Retrieve one LEVEL of the closure at once; returns ``[(member, text)]``.
+
+        Each item is ``(name, why)`` or ``(name, why, hint)``. ``type_hint`` is the whole
+        level's, for a closure whose members are all one kind (COBOL's copybooks); the
+        third element is one member's own, for a closure whose members are not (a JCL
+        job's PROCs beside its control cards), and wins over ``type_hint`` when it is set.
 
         A level is the largest set of members known to be needed before any of them has
         been read, which is exactly what can be asked for together - the level below it
@@ -341,11 +349,17 @@ class Prefetcher:
 
         Planning the whole level first also collapses a name requested twice within it:
         :meth:`_plan` marks it seen on the first, so the second is ``seen`` and never
-        becomes a second request. Rows are appended in the level's own order, whatever
-        order the answers arrived in."""
-        planned = [p for p in (self._plan(raw, why) for raw, why in items)
-                   if p[0] != "seen"]
-        requests = [(p[2], type_hint) for p in planned if p[0] == "request"]
+        becomes a second request - the first ask's hint is the one sent. Rows are appended
+        in the level's own order, whatever order the answers arrived in."""
+        planned: List[tuple] = []
+        hints: List[Optional[str]] = []
+        for item in items:
+            p = self._plan(item[0], item[1])
+            if p[0] != "seen":
+                planned.append(p)
+                hints.append((item[2] if len(item) > 2 else None) or type_hint)
+        requests = [(p[2], hint) for p, hint in zip(planned, hints)
+                    if p[0] == "request"]
         answers = iter(call_service_many(self.fetcher, requests, jobs, self.dest)
                        if requests else ())
         out: List[Tuple[str, str]] = []
