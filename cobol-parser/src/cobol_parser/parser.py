@@ -463,8 +463,9 @@ def _scan_sql_declarations(lines) -> Tuple[List[dict], List[dict]]:
     column-list-less INSERT its table's declared order, wherever the DECLARE lives.
 
     Returns ``(cursors, tables)``:
-      cursors: [{cursor, selectList, selectDerivations, table, forKind,
+      cursors: [{cursor, selectList, selectDerivations, table, tables, forKind,
                  forStatement, line, member}]
+               tables: every table the select names, first-seen order, schema dropped
                forKind: "select" | "statement" | None (None = UNKNOWN)
       tables:  [{table, columns, line, member}]
     """
@@ -496,6 +497,10 @@ def _scan_sql_declarations(lines) -> Tuple[List[dict], List[dict]]:
             row = {"cursor": cursor, "selectList": select_list,
                    "selectDerivations": derivations,
                    "table": _declare_from_table(block),
+                   # Every table the select names, `table` among them: a cursor over a
+                   # join reads them all, and `table` alone keeps only one.
+                   "tables": _sql_table_refs(
+                       mask_literals(" ".join(b.text for b in block).upper())),
                    "forKind": for_kind, "forStatement": for_stmt,
                    "line": head.line, "member": head.origin}
             change = _declare_data_change(block)
@@ -523,6 +528,58 @@ _DATA_CHANGE = frozenset({"FINAL", "OLD", "NEW"})
 # The data-change statement's verb -> the word between it and its target, if any.
 _DATA_CHANGE_VERBS = {"INSERT": "INTO", "UPDATE": None, "DELETE": "FROM",
                       "MERGE": "INTO"}
+# Ends a FROM list at the paren depth it was opened at. ON/USING do not: a join's condition
+# can be followed by another `, t` or `JOIN t` in the same list.
+_CLAUSE_END = frozenset(["WHERE", "GROUP", "HAVING", "ORDER", "FETCH", "UNION", "EXCEPT",
+                         "INTERSECT", "FOR", "OPTIMIZE", "QUERYNO", "SKIP", "WITH", "SET",
+                         "VALUES", "INTO", "OFFSET", "LIMIT", "SELECT"])
+_SQL_TOKEN = re.compile(r"[A-Z0-9_$#@-]+(?:\s*\.\s*[A-Z0-9_$#@-]+)*|:[A-Z0-9-]+|'[^']*'|\S")
+
+
+def _sql_table_refs(mup: str) -> List[str]:
+    """Every base table a statement reads or writes, first-seen order, schema dropped (as
+    the interface's `_QUALIFIED` does). A FROM counts only inside a query, never inside a
+    function's parens (`EXTRACT(YEAR FROM D)`), and a WITH name is not a table.
+
+    Takes the statement text uppercased with its literals masked, so a string constant
+    holding `FROM X` cannot supply a table. Shared with the interface overlay, which
+    publishes a statement's tables from its text, as this scan does a cursor's."""
+    toks = _SQL_TOKEN.findall(mup or "")
+    out: List[str] = []
+    ctes: Set[str] = set()
+    prev = None
+    stack = [{"query": True, "in_from": False}]
+    for i, t in enumerate(toks):
+        nxt = toks[i + 1] if i + 1 < len(toks) else ""
+        frame = stack[-1]
+        if t == "(":
+            stack.append({"query": nxt in ("SELECT", "WITH", "VALUES", "INSERT", "UPDATE",
+                                           "DELETE", "MERGE"), "in_from": False})
+        elif t == ")":
+            if len(stack) > 1:
+                stack.pop()
+        else:
+            if t == "AS" and prev and nxt == "(" and frame is stack[0]:
+                ctes.add(prev.split(".")[-1].strip())
+            if frame["query"]:
+                # UPDATE is a table position only as a verb: `FOR UPDATE OF col` is not.
+                if (t in ("FROM", "JOIN") or (t == "UPDATE" and prev in (None, "(", "SQL"))
+                        or (t == "INTO" and prev in ("INSERT", "MERGE"))):
+                    frame["in_from"], name_pos = t in ("FROM", "JOIN"), True
+                elif t == "," and frame["in_from"]:
+                    name_pos = True
+                else:
+                    name_pos = False
+                    if t in _CLAUSE_END:
+                        frame["in_from"] = False
+                if name_pos and nxt and nxt not in ("(", ",", ")") and nxt[0] not in "':":
+                    word = nxt.split(".")[-1].strip()
+                    after = toks[i + 2] if i + 2 < len(toks) else ""
+                    if not (word in _NOT_A_TABLE or (word in _DATA_CHANGE and after == "TABLE")
+                            or word in ctes or word in out or not word[:1].isalpha()):
+                        out.append(word)
+        prev = t
+    return out
 
 
 def _declare_from_table(block: List[Token]) -> Optional[str]:

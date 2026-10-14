@@ -1846,3 +1846,79 @@ def test_a_copied_linkage_section_still_files_items_when_it_ends_no_division():
         "           GOBACK.\n", resolver=CopybookResolver(paths=[], fetcher=members.get))
     assert [(d.name, d.section) for d in prog.data_items] == [
         ("WS-A", "WORKING-STORAGE"), ("LK-HDR", "LINKAGE"), ("LK-MORE", "LINKAGE")]
+
+
+# --------------------------------------------------------------------------- #
+# every table a statement names, not only the first after FROM (upstream ledger item 65)
+#
+# A joined, comma-listed or subquery table was in no view: the interface took one table
+# per statement, and a cursor row recorded only `table`. `_sql_table_refs` is the one
+# reader for both - the interface over statement text, the scan over a DECLARE's tokens.
+# --------------------------------------------------------------------------- #
+
+import pytest                                                            # noqa: E402
+
+from cobol_parser.parser import _sql_table_refs                          # noqa: E402
+from cobol_parser.textutil import mask_literals                          # noqa: E402
+
+_TABLE_SHAPES = [
+    # the seven shapes the item reproduced
+    ("SELECT A.C INTO :X FROM T1 A, T2 B WHERE A.K = B.K", ["T1", "T2"]),
+    ("SELECT A.C INTO :X FROM T1 A INNER JOIN T2 B ON A.K = B.K", ["T1", "T2"]),
+    ("SELECT A.C INTO :X FROM T1 A LEFT OUTER JOIN T2 B ON A.K = B.K", ["T1", "T2"]),
+    ("SELECT C INTO :X FROM T1 A WHERE EXISTS (SELECT 1 FROM T2 S WHERE S.K = A.K)",
+     ["T1", "T2"]),
+    ("DELETE FROM T1 WHERE K IN (SELECT K FROM T2)", ["T1", "T2"]),
+    ("INSERT INTO T1 (K) SELECT K FROM T2", ["T1", "T2"]),
+    ("UPDATE T1 SET C = :X WHERE K IN (SELECT K FROM T2)", ["T1", "T2"]),
+    ("DECLARE C1 CURSOR FOR SELECT A.C FROM T1 A JOIN T2 B ON A.K = B.K", ["T1", "T2"]),
+    # the interface passes the statement with its EXEC SQL prefix
+    ("EXEC SQL UPDATE T1 SET C = :X WHERE K = :Y END-EXEC", ["T1"]),
+    # UPDATE is a table position only as a verb
+    ("SELECT C FROM T1 WHERE K = :X FOR UPDATE OF C", ["T1"]),
+    # a data-change reference names its inner target, once
+    ("SELECT C INTO :X FROM FINAL TABLE (UPDATE T1 SET C = C + 1 WHERE K = :Y)", ["T1"]),
+    ("SELECT K INTO :X FROM FINAL TABLE (INSERT INTO T1 (K) VALUES (:Y))", ["T1"]),
+    # a FROM inside a function's parens is not a table
+    ("SELECT EXTRACT(YEAR FROM D), TRIM(LEADING '0' FROM C), SUBSTRING(N FROM 1 FOR 3)"
+     " INTO :X, :Y, :Z FROM T1", ["T1"]),
+    # a table function and a LATERAL derived table: only the base tables
+    ("SELECT Q.K INTO :X FROM TABLE (F(:Y)) AS Q, T1", ["T1"]),
+    ("SELECT B.K INTO :X FROM T1 B, LATERAL (SELECT MAX(V) AS M FROM T2 I"
+     " WHERE I.K = B.K) AS L", ["T1", "T2"]),
+    # a common table expression's name is not a table; what it reads is
+    ("WITH X AS (SELECT K FROM T1) SELECT K INTO :Y FROM X, T2", ["T1", "T2"]),
+    # a derived table joined to a base table
+    ("SELECT D.K INTO :X FROM (SELECT K FROM T1) AS D JOIN T2 B ON D.K = B.K",
+     ["T1", "T2"]),
+    # a join condition does not end the FROM list
+    ("SELECT A.C INTO :X FROM T1 A JOIN T2 B ON A.K = B.K, T3 C", ["T1", "T2", "T3"]),
+    ("DECLARE C1 CURSOR FOR SELECT K FROM T1 UNION SELECT K FROM T2", ["T1", "T2"]),
+    # a scalar subquery: first-seen order
+    ("SELECT (SELECT MAX(K) FROM T2) INTO :X FROM T1", ["T2", "T1"]),
+    # correlation names are never tables
+    ("SELECT A.C INTO :X FROM T1 A, T2 AS B", ["T1", "T2"]),
+    # schema dropped, either spacing (the lexer splits `.` into its own token)
+    ("SELECT C INTO :X FROM OWNER.T1 A JOIN OWNER . T2 B ON A.K = B.K", ["T1", "T2"]),
+    ("SELECT CURRENT DATE INTO :X FROM SYSIBM.SYSDUMMY1", ["SYSDUMMY1"]),
+    # a string constant is masked, so its FROM / JOIN name nothing
+    ("SELECT K INTO :X FROM T1 WHERE N = 'FROM TX' OR N = 'JOIN TY'", ["T1"]),
+]
+
+
+@pytest.mark.parametrize("sql, tables", _TABLE_SHAPES)
+def test_every_table_a_statement_names_is_found(sql, tables):
+    assert _sql_table_refs(mask_literals(sql)) == tables
+
+
+def test_a_cursor_row_carries_every_table_its_select_names():
+    """`table` keeps its meaning - the first after FROM - and `tables` holds them all."""
+    row = _cursor_row("SELECT A.ID FROM T1 A JOIN T2 B ON A.K = B.K")
+    assert (row["table"], row["tables"]) == ("T1", ["T1", "T2"])
+    assert _cursor_row("SELECT ID FROM T1 WHERE ID = :WS-ID")["tables"] == ["T1"]
+
+
+def test_a_literal_in_a_cursors_select_names_no_table():
+    """The scan rebuilds the DECLARE's text from its tokens; a literal is one token,
+    quotes included, so masking still covers it."""
+    assert _cursor_row("SELECT 'FROM TX', ID FROM T1")["tables"] == ["T1"]

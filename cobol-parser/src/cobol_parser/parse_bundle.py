@@ -77,7 +77,10 @@ FORMAT = "cobol-parser"
 #      each Program.copybooks row (the member whose text wrote that COPY). Absent on a
 #      v<=9 bundle means UNKNOWN, not "the member wrote it": an old bundle's statements
 #      decode with origin None and its rows carry no parent key at all.
-VERSION = 10
+#  11  the tables key on Program.sql_cursors: every table a cursor's select names, not
+#      only the first after FROM. Absent on a v<=10 bundle means UNKNOWN - a FETCH on
+#      that cursor publishes only its `table`, as it did before.
+VERSION = 11
 #: The producer name this package writes. An external producer (a different parser
 #: emitting the same contract) writes its own, so a reader can tell whose parse it is.
 PRODUCER = "cobol-parser-python"

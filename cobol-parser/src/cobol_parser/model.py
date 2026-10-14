@@ -332,8 +332,10 @@ class Program:
     # parser only walks the PROCEDURE DIVISION, so a cursor DECLAREd in
     # WORKING-STORAGE (the common case: a DCLGEN-adjacent copybook) was invisible to
     # FETCH correlation, and every FETCH on it lost its column identity.
-    #   sql_cursors:     [{cursor, selectList, selectDerivations, table, forKind,
+    #   sql_cursors:     [{cursor, selectList, selectDerivations, table, tables, forKind,
     #                     forStatement, line, member[, dataChange]}]
+    #                    tables: every table the select names (a join's, a subquery's),
+    #                    first-seen order, schema dropped
     #                    dataChange: {verb, hostVars}, only on a cursor over a
     #                    data-change table reference (`FROM FINAL TABLE (INSERT ...)`)
     #   declared_tables: [{table, columns, line, member}]  (DECLARE TABLE / DCLGEN)

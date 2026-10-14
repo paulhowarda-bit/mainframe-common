@@ -447,7 +447,7 @@ def test_v10_statement_origin_and_copy_parent_round_trip_and_v9_bundles_still_op
     write_parse_bundle(out, source_name="n.cbl", source_text=src,
                        fmt=SourceFormat.FIXED, program=prog)
     doc = json.loads(out.read_text(encoding="utf-8"))
-    assert doc["version"] == VERSION == 10
+    assert doc["version"] == VERSION
     doc["version"] = 9
     for para in doc["program"]["paragraphs"]:
         for st in para["statements"]:
@@ -458,3 +458,33 @@ def test_v10_statement_origin_and_copy_parent_round_trip_and_v9_bundles_still_op
     old = open_parse_bundle(out).program()
     assert old.paragraphs[0].statements[0].origin is None
     assert all("parent" not in r for r in old.copybooks)
+
+
+def test_v11_carries_every_table_a_cursor_names_and_v10_bundles_still_open(tmp_path):
+    """VERSION 11 added the `tables` key on `Program.sql_cursors`. A v10 bundle never
+    recorded it, so its cursors open without the key - UNKNOWN, and a FETCH on such a
+    cursor publishes only its `table`, exactly as before the key existed."""
+    src = (
+        "       IDENTIFICATION DIVISION.\n"
+        "       PROGRAM-ID. TJN.\n"
+        "       DATA DIVISION.\n"
+        "       WORKING-STORAGE SECTION.\n"
+        "           EXEC SQL DECLARE C1 CURSOR FOR SELECT A.ID FROM T1 A\n"
+        "             INNER JOIN T2 B ON A.K = B.K END-EXEC.\n"
+        "       PROCEDURE DIVISION.\n"
+        "           GOBACK.\n"
+    )
+    prog = parse_program(src)
+    assert prog.sql_cursors[0]["tables"] == ["T1", "T2"]
+    assert _roundtrip(prog).sql_cursors[0]["tables"] == ["T1", "T2"]
+
+    out = tmp_path / "v10.parse.json"
+    write_parse_bundle(out, source_name="j.cbl", source_text=src,
+                       fmt=SourceFormat.FIXED, program=prog)
+    doc = json.loads(out.read_text(encoding="utf-8"))
+    assert doc["version"] == VERSION == 11
+    doc["version"] = 10
+    for c in doc["program"]["sql_cursors"]:
+        del c["tables"]
+    out.write_text(json.dumps(doc), encoding="utf-8")
+    assert "tables" not in open_parse_bundle(out).program().sql_cursors[0]
