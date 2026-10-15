@@ -482,9 +482,33 @@ def test_v11_carries_every_table_a_cursor_names_and_v10_bundles_still_open(tmp_p
     write_parse_bundle(out, source_name="j.cbl", source_text=src,
                        fmt=SourceFormat.FIXED, program=prog)
     doc = json.loads(out.read_text(encoding="utf-8"))
-    assert doc["version"] == VERSION == 11
+    assert doc["version"] == VERSION
     doc["version"] = 10
     for c in doc["program"]["sql_cursors"]:
         del c["tables"]
     out.write_text(json.dumps(doc), encoding="utf-8")
     assert "tables" not in open_parse_bundle(out).program().sql_cursors[0]
+
+
+def test_v12_carries_the_sql_call_target_item_and_v11_bundles_still_open(tmp_path):
+    """VERSION 12 added ExecStmt.target_item. A v11 bundle never recorded it, so its
+    `CALL :X` opens with no item - UNKNOWN, publishing `<procedure>` as before."""
+    src = _wrap("       0000-MAIN.\n"
+                "           EXEC SQL CALL :WS-P (:WS-IN) END-EXEC.\n",
+                "       01  WS-P   PIC X(8) VALUE 'PROCA'.\n"
+                "       01  WS-IN  PIC X(10).\n")
+    prog = parse_program(src)
+    assert prog.paragraphs[0].statements[0].target_item == "WS-P"
+    assert _roundtrip(prog) == prog
+
+    out = tmp_path / "v11.parse.json"
+    write_parse_bundle(out, source_name="c.cbl", source_text=src,
+                       fmt=SourceFormat.FIXED, program=prog)
+    doc = json.loads(out.read_text(encoding="utf-8"))
+    assert doc["version"] == VERSION == 12
+    doc["version"] = 11
+    for para in doc["program"]["paragraphs"]:
+        for st in para["statements"]:
+            del st["target_item"]
+    out.write_text(json.dumps(doc), encoding="utf-8")
+    assert open_parse_bundle(out).program().paragraphs[0].statements[0].target_item is None

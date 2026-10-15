@@ -1922,3 +1922,109 @@ def test_a_literal_in_a_cursors_select_names_no_table():
     """The scan rebuilds the DECLARE's text from its tokens; a literal is one token,
     quotes included, so masking still covers it."""
     assert _cursor_row("SELECT 'FROM TX', ID FROM T1")["tables"] == ["T1"]
+
+
+# --- ledger item 71: a period inside COPY ... REPLACING pseudo-text ends nothing -----
+
+_SPLIT_REPLACING = (
+    "       01  WS-AREA.\n"
+    "       COPY ZZ01REC  REPLACING ==05  :REC-DATA:.==\n"
+    "                BY               ==05 WS-REC-RECORD.==\n"
+    "                                 ==:REC-DATA:==\n"
+    "                BY               ==REC==.\n"
+    "       COPY OTHERCB.\n")
+
+
+def _copy_resolver(tmp_path):
+    from cobol_parser.preprocessor import CopybookResolver
+    (tmp_path / "ZZ01REC.cpy").write_text(
+        "       05  :REC-DATA:.\n"
+        "           10  :REC-DATA:-ID     PIC X(5).\n"
+        "       05  CN-ZZIOCREC         PIC X(08).\n"
+        "           88  ZZIOCREC-MODULE VALUE 'ZZIOCREC'.\n")
+    (tmp_path / "OTHERCB.cpy").write_text("       05  OTHER-X  PIC X.\n")
+    return CopybookResolver(paths=[str(tmp_path)])
+
+
+def test_a_period_closing_a_pseudo_text_operand_does_not_end_the_copy(tmp_path):
+    """`==05 :REC-DATA:.==` swaps a record header period included. That period was the
+    first `.` the statement scan saw, so the COPY was cut on its first line, matched
+    nothing, and the member was neither discovered nor expanded - silently."""
+    assert _members(_SPLIT_REPLACING) == ["ZZ01REC", "OTHERCB"]
+    prog = parse_program(
+        "       IDENTIFICATION DIVISION.\n       PROGRAM-ID. T.\n"
+        "       DATA DIVISION.\n       WORKING-STORAGE SECTION.\n" + _SPLIT_REPLACING
+        + "       PROCEDURE DIVISION.\n           GOBACK.\n",
+        resolver=_copy_resolver(tmp_path))
+    rows = [(r["member"], r["status"], r.get("replacing_pairs")) for r in prog.copybooks]
+    assert rows == [
+        ("ZZ01REC", "expanded", [("05  :REC-DATA:.", "05 WS-REC-RECORD."),
+                                 (":REC-DATA:", "REC")]),
+        ("OTHERCB", "expanded", None)]
+    assert {"WS-REC-RECORD", "REC-ID", "OTHER-X"} <= set(prog.data_by_name)
+
+
+def test_a_copybook_found_this_way_resolves_the_call_it_declares(tmp_path):
+    """The shape that bites: the lost member is the one whose 88-level names the module,
+    so losing it turned a resolvable dynamic CALL into an unresolved one."""
+    from cobol_parser.analysis import analyze_calls
+    prog = parse_program(
+        "       IDENTIFICATION DIVISION.\n       PROGRAM-ID. T.\n"
+        "       DATA DIVISION.\n       WORKING-STORAGE SECTION.\n" + _SPLIT_REPLACING
+        + "       PROCEDURE DIVISION.\n       0000-MAIN.\n"
+          "           SET ZZIOCREC-MODULE TO TRUE\n"
+          "           CALL CN-ZZIOCREC\n           GOBACK.\n",
+        resolver=_copy_resolver(tmp_path))
+    res = analyze_calls(prog).resolve("CN-ZZIOCREC")
+    assert (res.confident, res.resolved) == (True, "ZZIOCREC")
+
+
+def test_a_one_line_copy_replacing_periods_in_pseudo_text_still_resolves():
+    assert _members("       COPY ONELINE REPLACING ==A.== BY ==B.==.\n") == ["ONELINE"]
+    assert [r["replacing_pairs"] for r in _expanded(
+        "       COPY ONELINE REPLACING ==A.== BY ==B.==.\n").copybooks] == [
+        [("A.", "B.")]]
+
+
+def test_a_period_inside_a_literal_operand_does_not_end_the_copy():
+    body = ("       COPY LITCB REPLACING 'A.B'\n"
+            "                BY 'C'.\n")
+    assert _members(body) == ["LITCB"]
+    assert [r["replacing_pairs"] for r in _expanded(body).copybooks] == [
+        [("'A.B'", "'C'")]]
+
+
+def test_a_plain_copy_still_ends_at_its_own_period():
+    body = ("       COPY PLAINCB.\n"
+            "       01  WS-AFTER  PIC X.\n")
+    assert _members(body) == ["PLAINCB"]
+    assert [cl.text.strip() for cl in _expanded(body).lines][-1] == "01  WS-AFTER  PIC X."
+
+
+def test_a_replace_whose_first_line_closes_a_pseudo_text_with_a_period_applies():
+    """Same scan, same defect: the REPLACE was cut on its first line, parsed no pair,
+    and both of its lines were emitted as code."""
+    res = _expanded("       REPLACE ==05 :T:.==\n"
+                    "           BY ==05 WS-T.==.\n"
+                    "       01  WS-G.\n"
+                    "       05 :T:.\n")
+    assert [cl.text.strip() for cl in res.lines][-2:] == ["01  WS-G.", "05 WS-T."]
+
+
+# --- ledger item 72: EXEC SQL CALL :host-variable names its item, not a target -------
+
+def _sql_call(sql: str):
+    from cobol_parser.model import ExecStmt
+    prog = parse_program(_wrap(f"       0000-MAIN.\n           EXEC SQL {sql} END-EXEC.\n"))
+    return next(st for p in prog.paragraphs for st in p.statements
+                if isinstance(st, ExecStmt))
+
+
+def test_a_host_variable_procedure_is_reported_as_the_item_not_the_target():
+    st = _sql_call("CALL :WS-P (:WS-IN)")
+    assert (st.target, st.target_item) == (None, "WS-P")
+
+
+def test_a_literal_procedure_is_the_target_and_names_no_item():
+    st = _sql_call("CALL SCH.PROCB (:WS-IN)")
+    assert (st.target, st.target_item) == ("SCH.PROCB", None)

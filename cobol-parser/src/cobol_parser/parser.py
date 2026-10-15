@@ -1482,6 +1482,7 @@ class StmtParser:
 
         kind, target, conditions = "effect", None, []
         dynamic = False
+        target_item: Optional[str] = None
         into_vars: List[str] = []
         columns: List[dict] = []
         select_list: List[Optional[str]] = []
@@ -1552,9 +1553,9 @@ class StmtParser:
                 # operands are the procedure's PARAMETERS, not table columns - carrying
                 # the name here is what lets the interface classify it as a procedure
                 # endpoint instead of manufacturing a phantom table.
-                target = self._exec_sql_call_target(toks)
+                target, target_item = self._exec_sql_call_target(toks)
         return ExecStmt(line=line, lang=lang, verb=verb, text=text, kind=kind,
-                        target=target, dynamic=dynamic,
+                        target=target, dynamic=dynamic, target_item=target_item,
                         host_vars=host_vars, conditions=conditions,
                         into_vars=into_vars, columns=columns, select_list=select_list,
                         column_note=column_note,
@@ -2213,19 +2214,24 @@ class StmtParser:
         slot = cls._host_var_slot(item)
         return slot[0] if slot is not None else None
 
-    @staticmethod
-    def _exec_sql_call_target(toks: List[Token]) -> Optional[str]:
-        """`CALL proc(...)` / `CALL owner.proc(...)` -> the procedure name as written.
-        None when the procedure itself is a host variable (`CALL :WS-PROC` - a
-        runtime-determined name, like a dynamic COBOL CALL)."""
+    @classmethod
+    def _exec_sql_call_target(cls, toks: List[Token]
+                              ) -> Tuple[Optional[str], Optional[str]]:
+        """(target, target_item): `CALL proc(...)` / `CALL owner.proc(...)` -> the
+        procedure name as written, no item. `CALL :WS-PROC` -> no target and the host
+        variable WS-PROC: the name is the item's run-time value, like a dynamic COBOL
+        CALL, and is resolved the same way."""
         i_call = next((i for i, t in enumerate(toks)
                        if t.kind == "word" and t.up == "CALL"), None)
         if i_call is None:
-            return None
+            return None, None
+        hv = cls._host_var_at(toks, i_call + 1) if i_call + 1 < len(toks) else None
+        if hv is not None:
+            return None, hv[0]
         rest = toks[i_call + 1:]
         if rest and rest[0].kind == "punct" and rest[0].text == ":":
-            return None
-        return StmtParser._table_name(rest)
+            return None, None
+        return cls._table_name(rest), None
 
     # Db2 positioning keywords that may sit between FETCH and its cursor name.
     _FETCH_POS = frozenset({

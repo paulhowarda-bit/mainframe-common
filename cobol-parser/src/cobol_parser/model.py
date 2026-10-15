@@ -149,6 +149,10 @@ class ExecStmt(Stmt):
     # holding the module name, so the target is runtime-determined - same situation
     # as `CALL identifier`, resolved by the same constant propagation where provable.
     dynamic: bool = False
+    # `EXEC SQL CALL :WS-PROC`: the host variable holding the procedure name, WITHOUT
+    # the colon. `target` stays None - a data-item name is not a procedure name - and
+    # the item is resolved by the same constant propagation as `CALL identifier`.
+    target_item: Optional[str] = None
     host_vars: List[str] = field(default_factory=list)   # :WS-FOO references
     conditions: List[str] = field(default_factory=list)  # HANDLE condition names
     into_vars: List[str] = field(default_factory=list)   # SELECT/FETCH ... INTO targets

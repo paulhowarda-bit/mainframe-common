@@ -217,14 +217,33 @@ def _apply_replacing(text: str, pairs: List[Tuple[str, str]]) -> str:
     return text
 
 
+# What can hide a period from the statement scan: a literal, or a pseudo-text delimiter.
+_STATEMENT_SCAN = re.compile(r"'[^']*'|\"[^\"]*\"|==|\.")
+
+
 def _gather_statement(lines: List[CodeLine], i: int):
-    """From line i, collect lines until one carries a period; return (text, next_i)."""
-    parts = [lines[i].text]
+    """From line i, collect lines until one carries the separator period; return
+    (text, next_i).
+
+    The separator is a period outside pseudo-text and outside a literal - the one the
+    compiler ends the statement at. ``REPLACING ==05 :X:.== BY ==05 Y.==`` swaps a
+    record header period included, and the first ``.`` on that line is inside the
+    pseudo-text: stopping there cut the COPY in half, so the member was neither
+    discovered nor expanded. Pseudo-text may span lines; a literal may not (the
+    normalizer has already stitched continued literals)."""
+    parts: List[str] = []
+    in_pseudo = False
     j = i
-    while "." not in lines[j].text and j + 1 < len(lines):
-        j += 1
+    while True:
         parts.append(lines[j].text)
-    return " ".join(parts), j + 1
+        for m in _STATEMENT_SCAN.finditer(lines[j].text):
+            if m.group(0) == "==":
+                in_pseudo = not in_pseudo
+            elif m.group(0) == "." and not in_pseudo:
+                return " ".join(parts), j + 1
+        if j + 1 >= len(lines):
+            return " ".join(parts), j + 1
+        j += 1
 
 
 def _copy_statement(lines: List[CodeLine], i: int):

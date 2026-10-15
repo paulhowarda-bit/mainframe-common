@@ -80,7 +80,10 @@ FORMAT = "cobol-parser"
 #  11  the tables key on Program.sql_cursors: every table a cursor's select names, not
 #      only the first after FROM. Absent on a v<=10 bundle means UNKNOWN - a FETCH on
 #      that cursor publishes only its `table`, as it did before.
-VERSION = 11
+#  12  ExecStmt.target_item: the host variable `EXEC SQL CALL :X` names its procedure
+#      through. Absent on a v<=11 bundle means UNKNOWN - that CALL publishes
+#      `<procedure>` and no dynamic-call row, as it did before.
+VERSION = 12
 #: The producer name this package writes. An external producer (a different parser
 #: emitting the same contract) writes its own, so a reader can tell whose parse it is.
 PRODUCER = "cobol-parser-python"
