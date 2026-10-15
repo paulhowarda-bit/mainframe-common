@@ -101,3 +101,55 @@ def test_the_legacy_subject_keys_still_work():
     for key in ("program", "job", "region"):
         report = fetch_dependencies({key: "SUBJ", "artifacts": []}, None)
         assert report["subject"] == "SUBJ", key
+
+
+def _job_rows():
+    return {"subject": "JOB1", "artifacts": [
+        _row("SHARED", "proc", dependency="compile-time"),
+        _row("PROD.ACNTL(SHARED)", "control-card", dependency="compile-time")]}
+
+
+def test_a_proc_and_a_control_card_of_one_name_are_each_prefetched():
+    """Upstream ledger item 66: the second used to read `already-fetched` off the first,
+    and reported the card's bytes for the PROC."""
+    from mainframe_artifacts.fetch import fetch_dependencies
+
+    store = {("SHARED", "proc"): ("PROC TEXT\n", "PROCS/SHARED"),
+             ("SHARED", "cntl"): ("CARD\n", "ACNTL/SHARED")}
+    rows = fetch_dependencies(_job_rows(), None, prefetched=store)["artifacts"]
+    assert [(r["status"], r["source"], r["bytes"]) for r in rows] == [
+        ("prefetched", "PROCS/SHARED", 10), ("prefetched", "ACNTL/SHARED", 5)]
+
+
+def test_a_member_prefetched_as_another_type_is_still_asked_for():
+    from mainframe_artifacts.fetch import fetch_dependencies
+
+    asked = []
+
+    def fetcher(name, type=None, copy=None):           # noqa: A002 - the wire keyword
+        asked.append((name, type))
+        return {"found": True, "text": "CARD\n", "source_location": "ACNTL/SHARED"}
+    store = {("SHARED", "proc"): ("PROC TEXT\n", "PROCS/SHARED")}
+    rows = fetch_dependencies(_job_rows(), fetcher, prefetched=store)["artifacts"]
+    assert [r["status"] for r in rows] == ["prefetched", "fetched"]
+    assert asked == [("SHARED", "cntl")]
+
+
+def test_two_rows_asking_one_member_as_one_type_are_one_retrieval():
+    from mainframe_artifacts.fetch import fetch_dependencies
+
+    manifest = {"subject": "JOB1", "artifacts": [
+        _row("CARD1", "include-member"), _row("LIB(CARD1)", "control-card")]}
+    rows = fetch_dependencies(manifest, None,
+                              prefetched={("CARD1", "cntl"): ("X\n", "L")})["artifacts"]
+    assert [r["status"] for r in rows] == ["prefetched", "already-fetched"]
+
+
+def test_an_untyped_prefetch_still_answers_a_typed_row():
+    """A closure that asks with no type (Easytrieve's, assembler's) stores by name alone."""
+    from mainframe_artifacts.fetch import fetch_dependencies
+
+    manifest = {"subject": "PGM1", "artifacts": [_row("MAC1", "macro")]}
+    rows = fetch_dependencies(manifest, None,
+                              prefetched={("MAC1", None): ("M\n", "L")})["artifacts"]
+    assert rows[0]["status"] == "prefetched"

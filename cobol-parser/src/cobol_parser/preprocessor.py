@@ -28,6 +28,7 @@ from typing import Callable, List, Optional, Tuple
 
 from mainframe_artifacts.artifact_service import (decode_member,
                                normalize_fetched)  # re-exported: see artifact_service
+from mainframe_artifacts.prefetch import lookup
 from .normalizer import CodeLine, SourceFormat, normalize
 
 logger = logging.getLogger(__name__)
@@ -70,7 +71,9 @@ class CopybookResolver:
     exts: Tuple[str, ...] = ("", ".cpy", ".CPY", ".cbl", ".cob", ".copy", ".CBL")
     missing: str = "continue"  # 'continue' (stub + note) | 'error'
     fetcher: Optional[Callable[[str], object]] = None
-    # UPPERCASED member name -> (text, source), from the prefetch stage.
+    # The prefetch stage's store - (member, type asked as) -> (text, source) - read as
+    # the copybooks prefetch_cobol asked for, never as a same-named member of another
+    # type a --bind-jcl closure put in the same store.
     store: dict = field(default_factory=dict)
     # name -> (text, source) | None, so a repeated COPY does not re-hit the service.
     _cache: dict = field(default_factory=dict, repr=False)
@@ -80,7 +83,7 @@ class CopybookResolver:
     def resolve(self, name: str) -> Optional[Tuple[str, str]]:
         name = name.strip().strip("'\"")
         key = name.upper()
-        hit = self.store.get(key)
+        hit = lookup(self.store, key, "copybook")
         if hit is not None:
             return hit
         # Check the cache BEFORE the path sweep, and populate it from a local hit too.

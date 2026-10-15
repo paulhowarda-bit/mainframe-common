@@ -46,6 +46,7 @@ from typing import Callable, Dict, Iterable, List, Optional, Tuple
 from .report import DEFAULT_PRODUCER, REPORT_SCHEMA_VERSION
 from .artifact_service import (Fetched, ServiceUnavailable, call_service,
                                call_service_many, collect, decode_member)
+from .fetch import request_type
 
 # A member name that can plausibly be requested from a library. A control-card DD may
 # instead name a full dataset (`PARM.LIB(SORTCRD)`), handled by _DSN_MEMBER below.
@@ -60,6 +61,37 @@ _LOCAL_EXTS = ("", ".cpy", ".CPY", ".cbl", ".cob", ".copy", ".CBL",
 def member_key(name: str) -> str:
     """The canonical form a member is cached and reported under: unquoted, uppercased."""
     return str(name).strip().strip("'\"").upper()
+
+
+#: What the store is keyed on: the member, and the type it was ASKED for as (``None``
+#: for an ask that named no type). Not the name alone: one member name is often a PROC
+#: and a control card at once, and a PROC that reads its own card (``//SYSIN DD
+#: DSN=LIB(SAMENAME)``) had the card's text stored over the PROC's - the job then parsed
+#: to no steps at all, with no flag (upstream ledger item 66).
+StoreKey = Tuple[str, Optional[str]]
+
+
+def lookup(store: Dict[StoreKey, Tuple[str, str]], name: str,
+           type_hint: Optional[str] = None) -> Optional[Tuple[str, str]]:
+    """What ``store`` holds for ``name`` asked as ``type_hint``: ``(text, source)``, or
+    ``None``.
+
+    A typed ask reads the member stored under that type, else one stored by an ask that
+    named no type - never one asked for as some OTHER type, which is a different member
+    that happens to share the name. An ask that names no type keeps the name-only reading
+    it always had: the untyped row, else the first stored under the name. A dataset that
+    names a member (``PARM.LIB(SORTCRD)``) reads as that member."""
+    key = member_key(name)
+    dsn = _DSN_MEMBER.match(key)
+    for n in ((key, dsn.group("member").upper()) if dsn else (key,)):
+        for k in ((n, type_hint), (n, None)):
+            if k in store:
+                return store[k]
+        if type_hint is None:
+            for (m, _), hit in store.items():
+                if m == n:
+                    return hit
+    return None
 
 
 @dataclass
@@ -82,8 +114,9 @@ class PrefetchResult:
     #: shared by every front-end, so a hardcoded name here would have a JCL run and
     #: an Easytrieve run both filing reports claiming to be cobol-xstate's.
     producer: str = DEFAULT_PRODUCER
-    store: Dict[str, Tuple[str, str]] = field(default_factory=dict)
-    fetched: Dict[str, Fetched] = field(default_factory=dict)
+    #: (member, type asked as) -> (text, source); read it through :func:`lookup`.
+    store: Dict[StoreKey, Tuple[str, str]] = field(default_factory=dict)
+    fetched: Dict[StoreKey, Fetched] = field(default_factory=dict)
     rows: List[dict] = field(default_factory=list)
     # Set when the estate client itself could not be reached. NOT the same as any
     # individual member being absent, and never reported as if it were.
@@ -92,15 +125,11 @@ class PrefetchResult:
     def resolver(self) -> Callable[..., Optional[str]]:
         """A ``resolver(name, kind=None) -> text | None`` over the store, for ``parse_jcl``.
 
-        ``kind`` is accepted and not consulted: by the time this runs, the request that
-        needed it has been made, and the store holds what came back under the name."""
+        ``kind`` is the manifest's word for what the parse needs (``proc``,
+        ``control-card``, ...), read as the type that member was asked for as - so a
+        PROC and the control card of the same name each answer with their own text."""
         def _resolve(name: str, kind: Optional[str] = None) -> Optional[str]:
-            hit = self.store.get(member_key(name))
-            if hit is None:
-                # A control-card DD names a full DSN; the member is what was retrieved.
-                m = _DSN_MEMBER.match(member_key(name))
-                if m:
-                    hit = self.store.get(m.group("member").upper())
+            hit = lookup(self.store, name, request_type(kind) if kind else None)
             return hit[0] if hit else None
         return _resolve
 
@@ -119,6 +148,15 @@ class PrefetchResult:
                 if r["status"] in ("not-found", "error", "no-service")]
 
     def report(self) -> dict:
+        # A row says what it was asked for as only where that tells it apart: a member
+        # retrieved as two types is two rows, and without the type they read as one
+        # retrieval reported twice. Everywhere else the member alone is the identity.
+        types: Dict[str, set] = {}
+        for row in self.rows:
+            types.setdefault(row["member"], set()).add(row.get("type"))
+        members = [row if len(types[row["member"]]) > 1
+                   else {k: v for k, v in row.items() if k != "type"}
+                   for row in self.rows]
         return {
             "format": f"{self.producer}-prefetch",
             "formatVersion": REPORT_SCHEMA_VERSION,
@@ -142,7 +180,7 @@ class PrefetchResult:
             "serviceAvailable": self.unavailable is None,
             **({"serviceUnavailable": self.unavailable} if self.unavailable else {}),
             "counts": self.counts,
-            "members": self.rows,
+            "members": members,
         }
 
 
@@ -185,7 +223,18 @@ class Prefetcher:
         # deliberately NOT persisted on PrefetchResult: today a second Prefetcher
         # re-plans - and re-rows - members the first one recorded as not-found, and
         # changing that would change --bind-jcl's report.
-        self.seen: set = set(self.result.store) | {member_key(n) for n in (seen or ())}
+        #
+        # Both are (name, type) - an ask, not a name: the second kind of a name already
+        # asked for one kind has not been asked for yet. A `seen` name is settled
+        # whatever it is asked as, which is what that caller knows about it.
+        self.seen: set = set(self.result.store)
+        self._seeded = frozenset(member_key(n) for n in (seen or ()))
+
+    def settled(self, name: str, type_hint: Optional[str] = None) -> bool:
+        """Whether ``name`` asked as ``type_hint`` needs no request: it was asked for
+        already, however that came out. A closure tests this to know when it is done."""
+        key = member_key(name)
+        return (key, type_hint) in self.seen or key in self._seeded
 
     def name_source(self, source_name: str) -> None:
         """Name the run, but only if the shared result has not been named already.
@@ -225,23 +274,27 @@ class Prefetcher:
                         return decode_member(fh.read()), candidate
         return None
 
-    def _plan(self, raw: str, why: str = "") -> Tuple[str, Optional[dict],
-                                                      str, Optional[tuple]]:
-        """Settle one member as far as can be settled WITHOUT asking the service:
-        already-seen, not a requestable name, already on disk, or nothing to ask.
+    def _plan(self, raw: str, why: str = "",
+              type_hint: Optional[str] = None) -> Tuple[str, Optional[dict], str,
+                                                        Optional[tuple], Optional[str]]:
+        """Settle one ask - ``raw`` as ``type_hint`` - as far as can be settled WITHOUT
+        asking the service: already-seen, not a requestable name, already on disk, or
+        nothing to ask.
 
-        Returns ``(kind, row, member, local)``. The row is built but deliberately NOT
+        Returns ``(kind, row, member, local, type_hint)``. The row is built but deliberately NOT
         appended - the report's row order is part of its output, and a wave that recorded
         its locally-satisfied members as it planned them would file them ahead of the
         members either side that had to be fetched. Recording happens in :meth:`_record`,
         in request order, for every kind alike."""
         name = member_key(raw)
-        if name in self.seen:
-            return "seen", None, name, None
-        self.seen.add(name)
+        if self.settled(name, type_hint):
+            return "seen", None, name, None, type_hint
+        self.seen.add((name, type_hint))
 
-        row: dict = {"member": name, "status": "", "for": why} if why else \
-                    {"member": name, "status": ""}
+        # `type` is shown only where it tells two rows of one member apart (report()).
+        row: dict = {"member": name, "type": type_hint, "status": ""}
+        if why:
+            row["for"] = why
         if raw != name:
             row["requested"] = str(raw)
 
@@ -257,20 +310,20 @@ class Prefetcher:
             row["status"] = "skipped"
             row["reason"] = (f"'{name}' is not a member name that can be requested - "
                              f"it names something inside this job, not a stored member")
-            return "skipped", row, member, None
+            return "skipped", row, member, None, type_hint
 
         local = self._local(member)
         if local is not None:
-            return "local", row, member, local
+            return "local", row, member, local, type_hint
 
         if self.fetcher is None:
             row["status"] = "no-service"
             row["reason"] = (self.result.unavailable
                              or "no estate artifact service is configured, so this "
                                 "member was never looked for")
-            return "no-service", row, member, None
+            return "no-service", row, member, None, type_hint
 
-        return "request", row, member, None
+        return "request", row, member, None, type_hint
 
     def _record(self, planned: tuple, got=None) -> Optional[str]:
         """Append the planned row, update the store, and return the member's text.
@@ -280,11 +333,11 @@ class Prefetcher:
         distinct reason for coming back empty stays distinct - that separation is the
         point of the report, because "the estate does not have it" and "we could not ask"
         lead to completely different next actions."""
-        kind, row, member, local = planned
+        kind, row, member, local, type_hint = planned
         if kind == "local":
             row.update({"status": "local", "source": local[1], "bytes": len(local[0])})
             self.result.rows.append(row)
-            self.result.store[member] = local
+            self.result.store[(member, type_hint)] = local
             return local[0]
 
         if kind in ("skipped", "no-service"):
@@ -311,18 +364,16 @@ class Prefetcher:
         row["status"] = "fetched"
         row.update(got.row())
         self.result.rows.append(row)
-        self.result.fetched[member] = got
-        self.result.store[member] = (got.text, got.source)
+        self.result.fetched[(member, type_hint)] = got
+        self.result.store[(member, type_hint)] = (got.text, got.source)
         return got.text
 
     def obtain(self, raw: str, type_hint: Optional[str] = None,
                why: str = "") -> Optional[str]:
         """Retrieve one member, record a row, return its text (or ``None``)."""
-        planned = self._plan(raw, why)
+        planned = self._plan(raw, why, type_hint)
         if planned[0] == "seen":
-            # Via the resolver, not the raw store: a name first seen as
-            # `PARM.LIB(SORTCRD)` is stored under the member it resolved to.
-            return self.result.resolver()(planned[2])
+            return self.store_text(planned[2], type_hint)
         got = None
         if planned[0] == "request":
             try:
@@ -352,14 +403,12 @@ class Prefetcher:
         becomes a second request - the first ask's hint is the one sent. Rows are appended
         in the level's own order, whatever order the answers arrived in."""
         planned: List[tuple] = []
-        hints: List[Optional[str]] = []
         for item in items:
-            p = self._plan(item[0], item[1])
+            p = self._plan(item[0], item[1],
+                           (item[2] if len(item) > 2 else None) or type_hint)
             if p[0] != "seen":
                 planned.append(p)
-                hints.append((item[2] if len(item) > 2 else None) or type_hint)
-        requests = [(p[2], hint) for p, hint in zip(planned, hints)
-                    if p[0] == "request"]
+        requests = [(p[2], p[4]) for p in planned if p[0] == "request"]
         answers = iter(call_service_many(self.fetcher, requests, jobs, self.dest)
                        if requests else ())
         out: List[Tuple[str, str]] = []
@@ -369,6 +418,8 @@ class Prefetcher:
                 out.append((p[2], text))
         return out
 
-    def store_text(self, name: str) -> Optional[str]:
-        hit = self.result.store.get(member_key(name))
+    def store_text(self, name: str, type_hint: Optional[str] = None) -> Optional[str]:
+        """The text this run holds for ``name`` asked as ``type_hint`` (see :func:`lookup`);
+        a name seen as `PARM.LIB(SORTCRD)` reads as the member it was stored under."""
+        hit = lookup(self.result.store, name, type_hint)
         return hit[0] if hit else None

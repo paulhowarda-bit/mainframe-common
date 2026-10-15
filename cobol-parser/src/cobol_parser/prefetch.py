@@ -53,7 +53,7 @@ def prefetch_cobol(source: str, fetcher: Optional[Callable],
         nxt: List[Tuple[str, str]] = []
         for member, text in pf.obtain_wave(wave, "copybook", jobs):
             for nested in scan_copy_members(text, fmt):
-                if member_key(nested) not in pf.seen:
+                if not pf.settled(nested, "copybook"):
                     nxt.append((nested, f"COPY inside {member}"))
         wave = nxt
     return pf.result

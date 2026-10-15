@@ -288,12 +288,18 @@ def _dispatch(row: dict, subject: str, seen, prefetched: dict,
     """
     if row["status"] == "skipped":
         return "skipped", None                # build_fetch_plan already said why
-    key = str(row["request"]).upper()
-    if key == subject:
+    name = str(row["request"]).upper()
+    wanted = _wanted(row)
+    # One retrieval per (name, what it is asked as): a member is one round-trip however
+    # many rows arrive at it AS THAT, but a PROC and the control card of the same name -
+    # or a PROC and a program - are two members, and the second is not "already fetched"
+    # because the first was.
+    key = (name, tuple(wanted) if isinstance(wanted, list) else wanted)
+    if name == subject:
         return "subject", key
     if key in seen:
         return "inherit", key
-    if prefetched.get(key) is not None:
+    if _prefetched(prefetched, row) is not None:
         return "prefetched", key
     if fetcher is None:
         return "no-service", key
@@ -306,9 +312,20 @@ def _wanted(row: dict):
     return row.get("probeTypes") or row.get("type")
 
 
+def _prefetched(prefetched: dict, row: dict) -> Optional[Tuple[str, str]]:
+    """What stage 1 retrieved for this row: the member asked for as a type this row
+    wants (or by an ask that named none) - never one asked for as another type."""
+    from .prefetch import lookup              # prefetch imports this module
+    for type_hint in (row.get("probeTypes") or [row.get("type")]):
+        hit = lookup(prefetched, row["request"], type_hint)
+        if hit is not None:
+            return hit
+    return None
+
+
 def fetch_dependencies(manifest: dict, fetcher: Optional[Callable],
                        dest: Optional[str] = None,
-                       prefetched: Optional[Dict[str, Tuple[str, str]]] = None,
+                       prefetched: Optional[Dict[tuple, Tuple[str, str]]] = None,
                        unavailable: Optional[str] = None,
                        dynamic: Optional[dict] = None,
                        jobs: int = 1,
@@ -316,8 +333,9 @@ def fetch_dependencies(manifest: dict, fetcher: Optional[Callable],
     """Fetch this program's immediate dependent artifacts.
 
     ``fetcher(name, type=..., copy=...)`` is the estate's artifact service - mf-fetch by
-    default (see ``artifact_service``). ``prefetched`` is the store stage 1 filled: a
-    member already in it is reported, not re-requested. ``dest``, when given, collects
+    default (see ``artifact_service``). ``prefetched`` is the store stage 1 filled
+    (``PrefetchResult.store``, keyed on the member and the type it was asked for as): a
+    member already in it AS what a row wants is reported, not re-requested. ``dest``, when given, collects
     everything retrieved into one directory a later run can be pointed at with ``-I``.
 
     ``dynamic`` is the dynamic-calls report; its candidate targets are fetched too. They
@@ -349,7 +367,7 @@ def fetch_dependencies(manifest: dict, fetcher: Optional[Callable],
     # already retrieved in this run" even when the first attempt came back not-found or
     # errored - counting failures as successes in the very report that exists to say
     # what was retrieved.
-    done: Dict[str, str] = {}
+    done: Dict[tuple, str] = {}
 
     rows: List[dict] = []
     errors: List[dict] = []
@@ -369,7 +387,7 @@ def fetch_dependencies(manifest: dict, fetcher: Optional[Callable],
     # write on `done` is a race, and two threads would both find the name absent and both
     # ask for it.
     pending: List[Tuple[str, object]] = []
-    pending_keys: List[str] = []
+    pending_keys: List[tuple] = []
     seen_keys: set = set()
     for entry in plan:
         kind, key = _dispatch(entry, subject, seen_keys, prefetched, fetcher)
@@ -381,7 +399,7 @@ def fetch_dependencies(manifest: dict, fetcher: Optional[Callable],
             pending_keys.append(key)
 
     # PASS 2 - retrieve them. The only concurrent step; it decides nothing.
-    got_by_key: Dict[str, object] = dict(
+    got_by_key: Dict[tuple, object] = dict(
         zip(pending_keys, call_service_many(fetcher, pending, jobs, dest))
     ) if pending else {}
 
@@ -396,10 +414,6 @@ def fetch_dependencies(manifest: dict, fetcher: Optional[Callable],
             continue
 
         name = row["request"]
-        # Keyed on the NAME alone, not name+kind: one member is one round-trip however
-        # many ways this manifest arrives at it. A JCL job that both EXECs PAYPROC and
-        # names it as a called program produces two rows for one member, and asking the
-        # estate twice for the same thing is waste that scales with the estate.
         if kind == "subject":
             row.update({"status": "skipped",
                         "reason": f"{name} is the artifact being analysed, not a "
@@ -421,7 +435,7 @@ def fetch_dependencies(manifest: dict, fetcher: Optional[Callable],
             continue
 
         if kind == "prefetched":
-            hit = prefetched[key]
+            hit = _prefetched(prefetched, row)
             # Stage 1 already paid for this member. Reported, because a reader tracing
             # what this run retrieved needs it in the list - but not requested twice.
             row.update({"status": "prefetched", "source": hit[1], "bytes": len(hit[0]),
