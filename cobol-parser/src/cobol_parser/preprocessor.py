@@ -136,9 +136,15 @@ class PreprocessResult:
 # a phantom copybook (prefetched from the estate by name) and CONSUMED the ADD statement.
 # Same defect and same guard as the PROGRAM-ID fix (5f787a9): a hyphen is a word
 # character in COBOL even though the regex engine says otherwise.
+#
+# `COPY text-name [OF|IN library] [SUPPRESS] [REPLACING ...]`: SUPPRESS only keeps the
+# copied text out of the compiler LISTING - the text is still copied. With no place for
+# it here, `COPY X SUPPRESS.` matched nothing, so the member was neither prefetched nor
+# expanded and every item it declares was undeclared, with no flag (ledger item 73).
 _COPY_RE = re.compile(
     r"(?<![A-Z0-9-])COPY\b\s+([A-Z0-9$#@_.-]+|'[^']*'|\"[^\"]*\")"
     r"(?:\s+(?:OF|IN)\s+[A-Z0-9$#@_-]+)?"
+    r"(?:\s+SUPPRESS\b)?"
     r"(?:\s+REPLACING\s+(?P<rep>.*?))?\s*\.\s*$",
     re.I | re.S,
 )
