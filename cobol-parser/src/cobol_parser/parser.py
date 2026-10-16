@@ -452,6 +452,31 @@ def _structure_expander(items) -> Callable[[str], Optional[List[str]]]:
     return expand
 
 
+def _drop_sql_comments(block: List[Token]) -> List[Token]:
+    """An EXEC SQL block without its SQL comments: from a word beginning ``--`` to the end
+    of that line.
+
+    The lexer knows no SQL, so a comment's words are tokens of the block like any other.
+    After an opening paren - ``( -- 1st select ...`` - the comment's first word stood
+    where the subquery's SELECT should, so the scan took the frame for an expression and
+    lost every table inside it; and a table or ``:host-variable`` a comment merely
+    MENTIONS read as one the statement names. A ``--`` inside a string literal is a
+    string token, so it is unaffected. The line is keyed with its member, because a
+    copybook's line numbers are its own."""
+    out: List[Token] = []
+    dropping = None
+    for t in block:
+        here = (t.origin, t.line)
+        if dropping is not None and here == dropping:
+            continue
+        dropping = None
+        if t.kind == "word" and t.text.startswith("--"):
+            dropping = here
+            continue
+        out.append(t)
+    return out
+
+
 def _scan_sql_declarations(lines) -> Tuple[List[dict], List[dict]]:
     """Every SQL cursor DECLARE and DECLARE TABLE in the WHOLE expanded stream.
 
@@ -486,6 +511,7 @@ def _scan_sql_declarations(lines) -> Tuple[List[dict], List[dict]]:
             block.append(toks[j])
             j += 1
         i = j + 1
+        block = _drop_sql_comments(block)
         words = [b for b in block if b.kind == "word"]
         if not words or words[0].up != "DECLARE":
             continue
@@ -533,6 +559,10 @@ _DATA_CHANGE_VERBS = {"INSERT": "INTO", "UPDATE": None, "DELETE": "FROM",
 _CLAUSE_END = frozenset(["WHERE", "GROUP", "HAVING", "ORDER", "FETCH", "UNION", "EXCEPT",
                          "INTERSECT", "FOR", "OPTIMIZE", "QUERYNO", "SKIP", "WITH", "SET",
                          "VALUES", "INTO", "OFFSET", "LIMIT", "SELECT"])
+# The words after a `(` that make it a query of its own (a subquery, a derived table, a
+# data-change statement), rather than an expression's or a column list's parens.
+_QUERY_HEADS = frozenset({"SELECT", "WITH", "VALUES", "INSERT", "UPDATE", "DELETE",
+                          "MERGE"})
 _SQL_TOKEN = re.compile(r"[A-Z0-9_$#@-]+(?:\s*\.\s*[A-Z0-9_$#@-]+)*|:[A-Z0-9-]+|'[^']*'|\S")
 
 
@@ -548,36 +578,55 @@ def _sql_table_refs(mup: str) -> List[str]:
     out: List[str] = []
     ctes: Set[str] = set()
     prev = None
+    closed_after = None          # the token before the `(` the last `)` closed
     stack = [{"query": True, "in_from": False}]
     for i, t in enumerate(toks):
         nxt = toks[i + 1] if i + 1 < len(toks) else ""
         frame = stack[-1]
+        name_pos = False
         if t == "(":
-            stack.append({"query": nxt in ("SELECT", "WITH", "VALUES", "INSERT", "UPDATE",
-                                           "DELETE", "MERGE"), "in_from": False})
+            sub = nxt in _QUERY_HEADS
+            # A `(` that opens a JOIN GROUP inside a FROM list - `FROM (T1 A LEFT OUTER
+            # JOIN T2 B ON ...) LEFT OUTER JOIN T3 ...`, the idiomatic multi-way outer
+            # join - is still that list, so its first word is a table and its JOINs name
+            # tables. Read as a non-query frame, every table inside it was lost. The
+            # token before it says which: `FROM TABLE (...)` and `FROM FINAL TABLE
+            # (...)` are preceded by TABLE, and an `ON (...)` or `IN (...)` is not in a
+            # FROM list at all.
+            group = (not sub and frame["query"] and frame["in_from"]
+                     and prev in ("FROM", "JOIN", ",", "("))
+            stack.append({"query": sub or group, "in_from": group, "after": prev})
+            name_pos = group
         elif t == ")":
             if len(stack) > 1:
-                stack.pop()
+                closed_after = stack.pop()["after"]
         else:
             if t == "AS" and prev and nxt == "(" and frame is stack[0]:
-                ctes.add(prev.split(".")[-1].strip())
+                # `WITH X AS (` names X; `WITH X (A, B) AS (` names it before its column
+                # list, which the token before AS (`)`) is not - the CTE was then read
+                # as a base table wherever the statement selects from it.
+                name = closed_after if prev == ")" else prev
+                if name:
+                    ctes.add(name.split(".")[-1].strip())
+            if t == "MERGE" and prev in (None, "(", "SQL"):
+                frame["merge"] = True
             if frame["query"]:
                 # UPDATE is a table position only as a verb: `FOR UPDATE OF col` is not.
+                # A MERGE's USING names its source when that is a table, not a `(`.
                 if (t in ("FROM", "JOIN") or (t == "UPDATE" and prev in (None, "(", "SQL"))
-                        or (t == "INTO" and prev in ("INSERT", "MERGE"))):
+                        or (t == "INTO" and prev in ("INSERT", "MERGE"))
+                        or (t == "USING" and frame.get("merge"))):
                     frame["in_from"], name_pos = t in ("FROM", "JOIN"), True
                 elif t == "," and frame["in_from"]:
                     name_pos = True
-                else:
-                    name_pos = False
-                    if t in _CLAUSE_END:
-                        frame["in_from"] = False
-                if name_pos and nxt and nxt not in ("(", ",", ")") and nxt[0] not in "':":
-                    word = nxt.split(".")[-1].strip()
-                    after = toks[i + 2] if i + 2 < len(toks) else ""
-                    if not (word in _NOT_A_TABLE or (word in _DATA_CHANGE and after == "TABLE")
-                            or word in ctes or word in out or not word[:1].isalpha()):
-                        out.append(word)
+                elif t in _CLAUSE_END:
+                    frame["in_from"] = False
+        if name_pos and nxt and nxt not in ("(", ",", ")") and nxt[0] not in "':":
+            word = nxt.split(".")[-1].strip()
+            after = toks[i + 2] if i + 2 < len(toks) else ""
+            if not (word in _NOT_A_TABLE or (word in _DATA_CHANGE and after == "TABLE")
+                    or word in ctes or word in out or not word[:1].isalpha()):
+                out.append(word)
         prev = t
     return out
 
@@ -1457,6 +1506,8 @@ class StmtParser:
         # optional terminating period
         if self._at_period():
             self._next()
+        if lang == "SQL":
+            toks = _drop_sql_comments(toks)
         words = [t.up for t in toks if t.kind == "word"]
         verb = words[0] if words else "?"
         text = " ".join(t.text for t in toks)
@@ -1510,9 +1561,11 @@ class StmtParser:
         elif lang == "SQL":
             if verb == "WHENEVER":
                 kind = "handle"
-            elif verb in ("SELECT", "FETCH"):
+            elif verb in ("SELECT", "FETCH", "WITH"):
                 # SELECT/FETCH ... INTO :a, :b ... FROM/WHERE: the DB populates the host
                 # variables. Capture them so the action models a real (external) input.
+                # A statement that begins WITH is a SELECT behind its common table
+                # expressions, and its INTO is the same input.
                 into_vars = self._expand_structures(self._exec_into_vars(toks),
                                                     expanded_structures)
                 if into_vars:
@@ -1520,7 +1573,18 @@ class StmtParser:
                 # ...and WHICH COLUMN fills each one - the only thing that proves two
                 # programs read the same state. A FETCH's columns live on its cursor's
                 # DECLARE, so it is correlated later (see interface._cursor_columns).
-                if verb == "SELECT":
+                if verb == "WITH":
+                    # Its select list names the common table expressions' columns, and
+                    # which base column each one is - renamed, derived or aggregated
+                    # inside a CTE - is not traced here. Correlating the names anyway
+                    # would stamp a CTE column onto a base table as if it were one of
+                    # that table's own.
+                    if into_vars:
+                        column_note = ("the select reads common table expressions; "
+                                       "which base column fills each host variable is "
+                                       "not traced through them - verify by hand")
+                        column_unresolved = "common-table-expression"
+                elif verb == "SELECT":
                     select_list, select_derivations, column_note =                         self._exec_select_columns(toks)
                     columns, column_note, column_unresolved = self._correlate(
                         select_list, into_vars, column_note, select_derivations)

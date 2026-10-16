@@ -1859,6 +1859,7 @@ def test_a_copied_linkage_section_still_files_items_when_it_ends_no_division():
 import pytest                                                            # noqa: E402
 
 from cobol_parser.parser import _sql_table_refs                          # noqa: E402
+from cobol_parser.preprocessor import scan_copy_members                  # noqa: E402
 from cobol_parser.textutil import mask_literals                          # noqa: E402
 
 _TABLE_SHAPES = [
@@ -1903,6 +1904,33 @@ _TABLE_SHAPES = [
     ("SELECT CURRENT DATE INTO :X FROM SYSIBM.SYSDUMMY1", ["SYSDUMMY1"]),
     # a string constant is masked, so its FROM / JOIN name nothing
     ("SELECT K INTO :X FROM T1 WHERE N = 'FROM TX' OR N = 'JOIN TY'", ["T1"]),
+    # ledger item 75: a parenthesised join group is still the FROM list it sits in
+    ("DECLARE C1 CURSOR FOR SELECT A.X FROM (((T_APTR_TRANSACTION A LEFT OUTER JOIN"
+     " T_APRC_REP_COMM B ON A.T = B.T) LEFT OUTER JOIN T_APCR_CARRIER_REF D ON A.C = D.C)"
+     " LEFT OUTER JOIN T_APPR_PRDT_REF E ON A.P = E.P) LEFT OUTER JOIN T_APPD_PRDT_DESC C"
+     " ON A.Q = C.Q",
+     ["T_APTR_TRANSACTION", "T_APRC_REP_COMM", "T_APCR_CARRIER_REF", "T_APPR_PRDT_REF",
+      "T_APPD_PRDT_DESC"]),
+    ("SELECT A INTO :X FROM (T1 A JOIN T2 B ON A.K = B.K) JOIN T3 C ON (A.K = C.K)",
+     ["T1", "T2", "T3"]),
+    ("SELECT A INTO :X FROM T1 A, (T2 B JOIN T3 C ON B.K = C.K) WHERE A.K = B.K",
+     ["T1", "T2", "T3"]),
+    # ...and a CTE declared with a column list is a CTE, not a table
+    ("WITH X (A, B) AS (SELECT A, B FROM T1) SELECT * FROM X", ["T1"]),
+    ("WITH CYCLE_LST (CYCLE_TIME) AS (SELECT TIME(M.CYC_C) FROM T_MHRC_CYC M)"
+     " SELECT MIN(CYCLE_TIME) INTO :H FROM CYCLE_LST", ["T_MHRC_CYC"]),
+    ("WITH A1 AS (SELECT K FROM T1), B1 (Z) AS (SELECT K FROM T2)"
+     " SELECT COUNT(*) INTO :N FROM A1, B1, T3", ["T1", "T2", "T3"]),
+    # ledger item 76: a MERGE writes its target and reads its source
+    ("MERGE INTO T1 A USING (VALUES (:X, :Y)) AS B (K, V) ON A.K = B.K WHEN MATCHED"
+     " THEN UPDATE SET V = B.V WHEN NOT MATCHED THEN INSERT (K, V) VALUES (B.K, B.V)",
+     ["T1"]),
+    ("MERGE INTO T1 A USING (SELECT K, V FROM T2) AS B ON A.K = B.K WHEN MATCHED"
+     " THEN UPDATE SET V = B.V", ["T1", "T2"]),
+    ("MERGE INTO OWNER.T1 A USING OWNER.T2 B ON A.K = B.K WHEN MATCHED THEN DELETE",
+     ["T1", "T2"]),
+    # a USING outside a MERGE names no table
+    ("EXEC SQL OPEN C1 USING :X END-EXEC", []),
 ]
 
 
@@ -2028,3 +2056,105 @@ def test_a_host_variable_procedure_is_reported_as_the_item_not_the_target():
 def test_a_literal_procedure_is_the_target_and_names_no_item():
     st = _sql_call("CALL SCH.PROCB (:WS-IN)")
     assert (st.target, st.target_item) == ("SCH.PROCB", None)
+
+
+# --- ledger item 73: COPY ... SUPPRESS is a COPY -------------------------------------
+
+_SUPPRESSED = ("       COPY FBDTMSGP SUPPRESS.\n"
+               "       COPY OTHERCB.\n"
+               "       COPY CB4 SUPPRESS REPLACING ==A== BY ==B==.\n")
+
+
+def _suppress_resolver(tmp_path):
+    from cobol_parser.preprocessor import CopybookResolver
+    (tmp_path / "FBDTMSGP.cpy").write_text("       01  X-FBDTMSGP  PIC X.\n")
+    (tmp_path / "OTHERCB.cpy").write_text("       01  X-OTHERCB   PIC X.\n")
+    (tmp_path / "CB4.cpy").write_text("       01  X-CB4-A     PIC X.\n")
+    return CopybookResolver(paths=[str(tmp_path)])
+
+
+def test_a_suppressed_copy_is_discovered_and_expanded(tmp_path):
+    """SUPPRESS only keeps the copied text out of the listing. With no place for it in
+    the COPY grammar the statement matched nothing: the member was never prefetched,
+    never expanded, and every item it declares was undeclared - silently."""
+    assert _members(_SUPPRESSED) == ["FBDTMSGP", "OTHERCB", "CB4"]
+    prog = parse_program(
+        "       IDENTIFICATION DIVISION.\n       PROGRAM-ID. T.\n"
+        "       DATA DIVISION.\n       WORKING-STORAGE SECTION.\n" + _SUPPRESSED
+        + "       PROCEDURE DIVISION.\n           GOBACK.\n",
+        resolver=_suppress_resolver(tmp_path))
+    rows = [(r["member"], r["status"], r.get("replacing_pairs")) for r in prog.copybooks]
+    assert rows == [("FBDTMSGP", "expanded", None), ("OTHERCB", "expanded", None),
+                    ("CB4", "expanded", [("A", "B")])]
+    assert {"X-FBDTMSGP", "X-OTHERCB", "X-CB4-B"} <= set(prog.data_by_name)
+
+
+@pytest.mark.parametrize("body, members", [
+    ("       COPY X OF LIB SUPPRESS.\n", ["X"]),
+    ("       COPY X IN LIB SUPPRESS REPLACING ==A== BY ==B==.\n", ["X"]),
+    ("       COPY X SUPPRESS\n           .\n", ["X"]),
+    ("       COPY X\n           SUPPRESS.\n", ["X"]),
+    # unchanged
+    ("       COPY X.\n", ["X"]),
+    ("       COPY X REPLACING ==A== BY ==B==.\n", ["X"]),
+])
+def test_every_place_suppress_can_stand_is_a_copy(body, members):
+    assert _members(body) == members
+
+
+def test_a_data_name_ending_in_suppress_is_not_a_copy():
+    assert scan_copy_members(_wrap("       0000-MAIN.\n"
+                                   "           MOVE 1 TO WS-COPY-SUPPRESS.\n"
+                                   "           GOBACK.\n")) == []
+
+
+# --- ledger item 75: an SQL comment is not statement text ----------------------------
+
+_COMMENTED_CURSOR = (
+    "           EXEC SQL DECLARE C1 CURSOR FOR (\n"
+    "               -- 1st select, naming T9 and :WS-ID\n"
+    "               SELECT A FROM T1 -- and T8 on the same line\n"
+    "               UNION ALL SELECT B FROM T2 )\n"
+    "           END-EXEC.\n")
+
+
+def test_a_comment_after_an_opening_paren_does_not_hide_the_subquery():
+    """The comment's first word stood where the subquery's SELECT should, so the frame
+    read as an expression and every table inside it was lost."""
+    prog = parse_program(
+        "       IDENTIFICATION DIVISION.\n       PROGRAM-ID. T.\n"
+        "       DATA DIVISION.\n       WORKING-STORAGE SECTION.\n"
+        "       01  WS-ID PIC 9(5).\n" + _COMMENTED_CURSOR
+        + "       PROCEDURE DIVISION.\n           GOBACK.\n")
+    assert prog.sql_cursors[0]["tables"] == ["T1", "T2"]
+
+
+def test_a_statements_comment_names_no_table_and_no_host_variable():
+    from cobol_parser.model import ExecStmt
+    prog = parse_program(_wrap(
+        "       0000-MAIN.\n"
+        "           EXEC SQL\n"
+        "             SELECT A INTO :WS-A -- not :WS-B, and not FROM T9\n"
+        "               FROM T1 WHERE K = 'X -- Y'\n"
+        "           END-EXEC.\n"))
+    st = next(s for p in prog.paragraphs for s in p.statements if isinstance(s, ExecStmt))
+    assert st.host_vars == [":WS-A"]
+    assert st.text == "SELECT A INTO : WS-A FROM T1 WHERE K = 'X -- Y'"
+
+
+# --- ledger item 76: a statement that begins WITH is the SELECT behind it -------------
+
+def test_a_with_statements_into_targets_are_its_input():
+    """Its INTO is filled from the database exactly as a SELECT's is. Which base column
+    fills each target is not traced through the CTEs, and the statement says so rather
+    than stamping a CTE's column onto a base table."""
+    from cobol_parser.model import ExecStmt
+    prog = parse_program(_wrap(
+        "       0000-MAIN.\n"
+        "           EXEC SQL WITH C AS (SELECT K FROM T1)\n"
+        "                SELECT COUNT(*) INTO :WS-N FROM C WHERE K > :WS-K\n"
+        "           END-EXEC.\n"))
+    st = next(s for p in prog.paragraphs for s in p.statements if isinstance(s, ExecStmt))
+    assert (st.verb, st.kind, st.into_vars) == ("WITH", "input", ["WS-N"])
+    assert st.columns == []
+    assert st.column_unresolved == "common-table-expression"

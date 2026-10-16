@@ -19,9 +19,10 @@ What it does, in pipeline order:
 
 1. **normalize** — fixed/free source format (auto-detected), column-7 indicator
    handling, continuation-literal stitching, comment stripping.
-2. **preprocess** — `COPY` / `COPY … REPLACING` / `EXEC SQL INCLUDE` expansion through a
-   pluggable copybook resolver (search paths, extension lists, optional estate fetcher
-   from `mainframe-artifacts`), with every expanded line tagged with its copybook origin.
+2. **preprocess** — `COPY` (with `OF`/`IN`, `SUPPRESS`, `REPLACING`) / `EXEC SQL INCLUDE`
+   expansion through a pluggable copybook resolver (search paths, extension lists,
+   optional estate fetcher from `mainframe-artifacts`), with every expanded line tagged
+   with its copybook origin.
 3. **lex** — tokens carrying source line + copybook provenance.
 4. **parse** — PROCEDURE DIVISION sections/paragraphs and a control-flow statement AST
    (`IF` / `EVALUATE` / `PERFORM` / `GO TO` / I/O / `CALL` / `ALTER` / handlers /
